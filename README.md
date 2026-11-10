@@ -1,102 +1,122 @@
+<div align="center">
+
 # multi-mcp-proxy
 
-一个部署在 Cloudflare Workers 上的多服务 MCP 透明反向代理，为每个服务维护独立的 API 密钥池。
+**A transparent MCP reverse proxy for Cloudflare Workers, with one API key pool per service.**
 
-指向某个服务的请求会原样转发到上游 MCP 端点，代理只替换凭证那一行请求头。上游判定某把密钥额度耗尽或已失效时，代理自动换下一把重放，客户端无感知。
+Point a request at a service, and it goes to the upstream MCP endpoint byte for byte. The proxy replaces one header, the credential. When the upstream says a key is dead, the proxy swaps in the next one and replays the request. The client never notices.
 
-## 为什么需要它
+[![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare%20Workers-F38020?style=flat-square&logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
+[![Durable Objects](https://img.shields.io/badge/Durable%20Objects-SQLite-F38020?style=flat-square&logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/durable-objects/)
+[![Hono](https://img.shields.io/badge/Hono-E36002?style=flat-square&logo=hono&logoColor=white)](https://hono.dev/)
+[![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-000000?style=flat-square)](https://modelcontextprotocol.io/)
 
-主流 MCP 托管端点把额度耗尽和鉴权失败都塞进 HTTP 200 的响应体里：
+[![Free plan](https://img.shields.io/badge/runs%20on-Workers%20Free-f0a020?style=flat-square)](https://developers.cloudflare.com/workers/platform/limits/)
+[![Tests](https://img.shields.io/badge/tests-130%20passing-2ea44f?style=flat-square)](#development)
+[![i18n](https://img.shields.io/badge/panel%20languages-5-6d5cff?style=flat-square)](#interface-languages)
+[![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+
+[English](README.md) · [简体中文](README.zh.md)
+
+</div>
+
+---
+
+## Why this exists
+
+Hosted MCP endpoints report quota exhaustion and dead credentials inside an HTTP 200 response body:
 
 ```
 event: message
 data: {"result":{"content":[{"type":"text","text":"The Firecrawl API key is invalid or revoked."}],"isError":true},"jsonrpc":"2.0","id":9}
 ```
 
-状态码是 200，纯 header 层的反代看不到任何异常。结果就是一把密钥失效后，所有请求都会继续打在它上面，客户端拿到的是错误文本，代理毫不知情。
+The status code is 200. A proxy that only looks at headers sees nothing wrong. So a dead key keeps receiving traffic forever, the client gets error text, and the proxy has no idea.
 
-这个项目在响应流上做一次首事件窥探，判定失败就换密钥重放，判定正常就把已读字节补发回去接着流式转发。
+This project peeks at the first SSE event on the response stream. If it is a failure, the proxy discards the response, picks another key and replays the same request body. If it is fine, the bytes already read are flushed back out and the rest streams through untouched.
 
-## 实测依据
+## Measured, not assumed
 
-设计不是照文档写的，上线前对三个上游逐个探过：
+The design came from probing each upstream by hand before writing any of it:
 
-| 上游 | 端点 | 凭证方式 | 无额度信号 | 会话绑定密钥 |
+| Upstream | Endpoint | Credential | Exhaustion signal | Session bound to key |
 |---|---|---|---|---|
-| Tavily | `mcp.tavily.com/mcp` | 仅 `Authorization: Bearer` | 432 与 200 正文 | 否 |
-| Firecrawl | `mcp.firecrawl.dev/mcp` | `x-api-key` 或 Bearer | 200 正文 isError | 否 |
-| Exa | `mcp.exa.ai/mcp` | `x-api-key`、Bearer 或 URL 参数 | 200 正文 isError | 否 |
+| Tavily | `mcp.tavily.com/mcp` | `Authorization: Bearer` only | 432 and 200 body | no |
+| Firecrawl | `mcp.firecrawl.dev/mcp` | `x-api-key` or Bearer | 200 body, `isError` | no |
+| Exa | `mcp.exa.ai/mcp` | `x-api-key`, Bearer, or query param | 200 body, `isError` | no |
 
-三条关键事实：
+Three findings that shaped the architecture:
 
-1. 会话不绑定密钥。用 A 建的会话，换 B 调用，上游用的是 B。所以换密钥不需要重建会话。
-2. `initialize` 和 `tools/list` 不校验额度。池化只需要发生在 `tools/call`。
-3. Firecrawl 和 Exa 的 `Accept` 必须同时包含 `application/json` 与 `text/event-stream`，否则直接 406。
+1. **Sessions are not bound to keys.** A session created with key A works fine when the next request arrives with key B, and the upstream bills B. So rotating keys never requires re-establishing a session.
+2. **`initialize` and `tools/list` do not check quota.** Pooling only has to happen on `tools/call`.
+3. **Firecrawl and Exa require `Accept` to list both `application/json` and `text/event-stream`.** Miss either and you get a flat 406.
 
-## 架构
+## Architecture
 
 ```
-客户端 ── x-proxy-key ──► Worker
-                            │
-                            ├─ KV      服务注册表（只读热路径，仅管理面写入）
-                            │
-                            └─ Durable Object (每个服务一个)
-                                 └─ SQLite 密钥池，串行保证选键原子性
+client ── x-proxy-key ──► Worker
+                           │
+                           ├─ KV              service registry
+                           │                  read hot path, written by admin only
+                           │
+                           └─ Durable Object  one per service
+                                └─ SQLite     key pool, serialized so picks are atomic
 ```
 
-状态放在 Durable Object 的 SQLite 里而不是 KV，因为 KV 免费版每天只有 1000 次写入和 1000 次 list。现有那些基于 KV 的实现每个请求都要 list 一次写一次，撑不到 500 次调用每天。DO 免费版每天 10 万行写入、500 万行读取，够用。
+State lives in a Durable Object's SQLite rather than KV because the KV free tier allows 1000 writes and 1000 list operations per day. Any KV-backed pool that lists and writes on every request dies somewhere under 500 calls a day. Durable Objects on the free plan allow 100k row writes and 5M row reads per day, which is enough.
 
-选键用「负载比最小优先」，按 `(使用次数 + 1) / 权重` 升序，同分再看最后使用时间。权重高的密钥自然多承担，也不会一直压在同一把上。
+Key selection prefers the least loaded, ranking by `(uses + 1) / weight` ascending and breaking ties on last-used time. A key with a higher weight reaches the same ratio only after proportionally more traffic, so load spreads in proportion to weight instead of pinning one key.
 
-密钥用 AES-GCM 加密后落库，主密钥来自 Worker secret，列表接口只返回掩码。
+Credentials are encrypted with AES-GCM before storage. The data key comes from a Worker secret. The list API only ever returns a mask.
 
-## 界面语言
+## Interface languages
 
-管理面板支持英文、简体中文、日语、德语、法语，按浏览器 `Accept-Language` 自动选择，也可以用右上角下拉手动切换，或者用 `?lang=ja` 直接指定。
+The admin panel ships in English, Simplified Chinese, Japanese, German and French. It picks a language from `Accept-Language`, and you can override it with the picker or `?lang=ja`.
 
-渲染在服务端完成，首屏就是正确语言，不闪。语言选择存在 cookie 里，下次直接生效。要加新语言，`src/i18n/` 下加一个文件即可，`Catalog` 类型会强制你覆盖全部键，漏翻直接编译报错。
+Rendering happens server side, so the first paint is already in the right language with no flash. The choice persists in a cookie. Adding a language means adding one file under `src/i18n/`; the `Catalog` type forces you to cover every key, so a missing translation is a compile error rather than a silent English fallback.
 
-MCP 接口本身不本地化。那些错误是给 MCP 客户端和集成方看的，不是给终端用户看的，保持英文。
+The MCP endpoints themselves are not localized on purpose. Those errors are consumed by MCP clients and integrations, not by a human reading the panel, and MCP error payloads are conventionally English.
 
-## 快速开始
+## Quick start
 
-需要一个 Cloudflare 账号，免费版即可。本仓库已经绑定了一个线上的 KV 命名空间，直接在 Cloudflare 控制台接 Git 部署即可跑起来。如果是 fork 到自己账号，把 `wrangler.toml` 里的 KV id 换成自己创建的。
+A Cloudflare account on the free plan is enough. This repository ships bound to a live KV namespace, so connecting it through the Cloudflare Git integration works as-is. Forking onto your own account? Replace the KV id in `wrangler.toml` with one you create.
 
 ```bash
 pnpm install
 
-# 1. 创建 KV 命名空间，把返回的 id 填进 wrangler.toml
+# 1. Create the KV namespace, then put the id into wrangler.toml
 npx wrangler kv namespace create REGISTRY
 
-# 2. 设置两个密钥
-npx wrangler secret put PROXY_KEY        # 客户端用来认证代理
-npx wrangler secret put ENCRYPTION_KEY   # 密钥池落库加密，随便一串 32 字节以上
+# 2. Set two secrets
+npx wrangler secret put PROXY_KEY        # authenticates clients to the proxy
+npx wrangler secret put ENCRYPTION_KEY   # encrypts the key pool, any 32+ byte string
 
-# 3. 部署
+# 3. Deploy
 pnpm deploy
 ```
 
-部署后访问 `https://你的域名/admin`，用 `PROXY_KEY` 登录。
+Then open `https://your-domain/admin` and log in with `PROXY_KEY`.
 
-新增服务时可以从预置里选 Tavily、Firecrawl 或 Exa，字段会自动填好。自定义服务填服务 ID、上游地址、凭证字段名即可。
+When adding a service you can start from the Tavily, Firecrawl or Exa preset, which fills in the credential location and the right status codes. For anything else, supply a service id, the upstream URL, and the credential field name.
 
-然后粘贴密钥，一行一个，批量导入。想给密钥加备注，就在密钥后面跟一个逗号再写备注：
+Paste keys one per line to import them in bulk. To attach a note, follow the key with a comma:
 
 ```
-tvly-abc123,小号一号
-tvly-def456,备用
+tvly-abc123,main-account
+tvly-def456,spare
 tvly-ghi789
 ```
 
-备注只是给人看的，代理不会把它发给上游。面板里每条密钥后面有个「备注」按钮，可以随时改或者清空。
+Notes are for humans only and are never sent upstream. Each row in the panel has a note button that edits or clears it.
 
-## 客户端接入
+## Client setup
 
 ```
-https://你的域名/服务ID/mcp
+https://your-domain/SERVICE_ID/mcp
 ```
 
-请求头带 `x-proxy-key`。以 opencode 为例：
+Send the `x-proxy-key` header. For opencode:
 
 ```jsonc
 {
@@ -104,67 +124,67 @@ https://你的域名/服务ID/mcp
     "servers": {
       "tavily": {
         "type": "remote",
-        "url": "https://你的域名/tavily/mcp",
-        "headers": { "x-proxy-key": "你的 PROXY_KEY" }
+        "url": "https://your-domain/tavily/mcp",
+        "headers": { "x-proxy-key": "YOUR_PROXY_KEY" }
       }
     }
   }
 }
 ```
 
-## 路由
+## Routes
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Description |
 |---|---|---|
-| ANY | `/:service/mcp` | 透明转发到该服务的上游 |
-| GET | `/admin` | 控制面板 |
-| GET | `/api/services` | 服务列表及各自密钥统计 |
-| POST | `/api/services` | 新增或更新服务 |
-| DELETE | `/api/services/:id` | 删除服务及其密钥 |
-| GET | `/api/services/:id/keys` | 列出密钥，只返回掩码 |
-| POST | `/api/services/:id/keys` | 批量添加密钥，每行一个，可选 `密钥,备注` |
-| PATCH | `/api/services/:id/keys/:keyId` | 改权重、状态或备注 |
-| DELETE | `/api/services/:id/keys` | 批量删除 |
-| POST | `/api/services/:id/keys/sync` | 从上游拉取真实余额 |
+| ANY | `/:service/mcp` | Transparent forward to that service's upstream |
+| GET | `/admin` | Admin panel |
+| GET | `/api/services` | Services with per-service key stats |
+| POST | `/api/services` | Create or update a service |
+| DELETE | `/api/services/:id` | Delete a service and its keys |
+| GET | `/api/services/:id/keys` | List keys, masks only |
+| POST | `/api/services/:id/keys` | Bulk add, one per line, optional `key,note` |
+| PATCH | `/api/services/:id/keys/:keyId` | Change weight, status or note |
+| DELETE | `/api/services/:id/keys` | Bulk delete |
+| POST | `/api/services/:id/keys/sync` | Pull real balances from the upstream |
 
-除 `/` 和 `/admin` 外全部需要 `x-proxy-key`。
+Everything except `/` and `/admin` requires `x-proxy-key`.
 
-## 失败判定
+## Failure classification
 
-判定分三层，顺序固定：
+Three layers, always in this order:
 
-1. HTTP 状态码。命中配置的失效、耗尽或限流状态码直接定性。Tavily 的 432 和 433 都算额度耗尽。
-2. JSON-RPC 错误信封。顶层有 `error` 对象时按消息归类。
-3. 结果对象。只在 `result.isError` 为真，或正文里存在显式 error 信封时才启用文本匹配。这一层是为了避免把搜索结果里正常出现的 `unauthorized` 字样误判成密钥失效。
+1. **HTTP status.** A configured invalid, exhausted or rate-limited status settles it immediately. Tavily's 432 and 433 both mean exhausted.
+2. **JSON-RPC error envelope.** A top-level `error` object is classified by its message.
+3. **Result object.** Text matching only runs when `result.isError` is true or an explicit error envelope is present. This layer exists so a search hit that happens to contain the word "unauthorized" in its title can never retire a key.
 
-重放的安全边界：
+Replay is bounded by what the upstream actually told us:
 
-- 鉴权失效、额度耗尽、限流会重放。这三类都意味着上游在扣费之前就拒绝了。
-- 5xx 和网络错误默认不重放，因为无法确认上游是否已经开始工作。只有服务配置里显式打开 `retryOn5xx` 且判定认为请求未被处理时才重放。
-- 非幂等工具比如研究任务，一旦拿到任务 ID 就不再重放。
+- Auth failures, quota exhaustion and rate limits are replayed. All three mean the upstream refused before doing any billable work.
+- 5xx and network errors are not replayed by default, because nothing proves the upstream did not start. A service can opt in with `retryOn5xx`, and even then replay only happens when the verdict says the request was not processed.
+- Non-idempotent tools such as research jobs stop being replayable once a job id comes back.
 
-## 已知限制
+## Known limits
 
-首事件窥探只覆盖同步类工具。如果某个工具先推进度通知、真正的结果在后面的帧里，第一帧判定不出来，这次请求会按正常流程透传，不做重放。这是刻意选择：要覆盖这种情况就得全量缓冲，代价是失去流式。
+First-event peeking only covers synchronous tools. If a tool emits a progress notification before the real result, the first frame carries no verdict, so the request streams through without replay. That is deliberate: covering it means buffering the whole response, which costs you streaming.
 
-上游把错误包在结果正文而不是 `isError` 里的非常规实现，需要按服务补充判定规则。
+Upstreams that wrap errors in result prose rather than `isError` need a per-service rule added.
 
-多账号绕免费额度违反多数服务的使用条款，账号被批量封是常见结果。密钥池能扛住大面积失效，但不代表不会发生。
+Rotating free accounts to exceed a free tier violates most providers' terms, and mass account bans are a normal outcome. The pool survives a wide failure, but it does not prevent one.
 
-## 开发
+## Development
 
 ```bash
-pnpm dev          # 本地起服务
-pnpm typecheck    # 类型检查
-pnpm test         # 单元测试与 Miniflare 集成测试
-pnpm e2e          # 打真实 Exa 端点，验证换 key 重放
-pnpm check:ui     # 检查面板内联脚本语法
+pnpm dev          # local server
+pnpm typecheck    # type check
+pnpm test         # unit and Miniflare integration tests
+pnpm e2e          # hit a real Exa endpoint to verify key rotation
+pnpm check:ui     # syntax check the panel's inline scripts
 ```
 
-测试直接用 Node 自带的运行器，不需要额外装 vitest。`pnpm test` 会跑 130 个用例，其中集成测试会在 Miniflare 里拉起真实的 KV 和 SQLite Durable Object，并覆盖语言协商、cookie 优先级和目录完整性。
+Tests run on Node's built in runner, so vitest is not needed. `pnpm test` covers 130 cases. The integration suite boots Miniflare with a real KV binding and a SQLite Durable Object, and also checks locale negotiation, cookie precedence and catalog completeness.
 
-判定逻辑在 `src/classify.ts`，转发与重放在 `src/forward.ts`，密钥池在 `src/pool.ts`。
+Classification lives in `src/classify.ts`, forwarding and replay in `src/forward.ts`, the key pool in `src/pool.ts`.
 
-## 许可
+## License
 
 MIT
