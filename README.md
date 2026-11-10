@@ -50,6 +50,14 @@ data: {"result":{"content":[{"type":"text","text":"The Firecrawl API key is inva
 
 密钥用 AES-GCM 加密后落库，主密钥来自 Worker secret，列表接口只返回掩码。
 
+## 界面语言
+
+管理面板支持英文、简体中文、日语、德语、法语，按浏览器 `Accept-Language` 自动选择，也可以用右上角下拉手动切换，或者用 `?lang=ja` 直接指定。
+
+渲染在服务端完成，首屏就是正确语言，不闪。语言选择存在 cookie 里，下次直接生效。要加新语言，`src/i18n/` 下加一个文件即可，`Catalog` 类型会强制你覆盖全部键，漏翻直接编译报错。
+
+MCP 接口本身不本地化。那些错误是给 MCP 客户端和集成方看的，不是给终端用户看的，保持英文。
+
 ## 快速开始
 
 需要一个 Cloudflare 账号，免费版即可。本仓库已经绑定了一个线上的 KV 命名空间，直接在 Cloudflare 控制台接 Git 部署即可跑起来。如果是 fork 到自己账号，把 `wrangler.toml` 里的 KV id 换成自己创建的。
@@ -153,7 +161,7 @@ pnpm e2e          # 打真实 Exa 端点，验证换 key 重放
 pnpm check:ui     # 检查面板内联脚本语法
 ```
 
-测试直接用 Node 自带的运行器，不需要额外装 vitest。`pnpm test` 会跑 73 个用例，其中集成测试会在 Miniflare 里拉起真实的 KV 和 SQLite Durable Object。
+测试直接用 Node 自带的运行器，不需要额外装 vitest。`pnpm test` 会跑 130 个用例，其中集成测试会在 Miniflare 里拉起真实的 KV 和 SQLite Durable Object，并覆盖语言协商、cookie 优先级和目录完整性。
 
 判定逻辑在 `src/classify.ts`，转发与重放在 `src/forward.ts`，密钥池在 `src/pool.ts`。
 

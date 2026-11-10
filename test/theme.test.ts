@@ -1,15 +1,43 @@
 /**
  * The panel resolves the theme in an inline script before first paint, so a
  * wrong default shows as a flash. This exercises that script in a fake DOM.
+ *
+ * The panel is imported through esbuild rather than directly, because Node's
+ * type stripping does not resolve directory imports like `./i18n`.
  */
 
-import { test } from "node:test";
+import { test, before } from "node:test";
 import assert from "node:assert/strict";
-import { ADMIN_HTML } from "../src/admin-ui.ts";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+
+let renderAdmin: (locale: string) => string;
+
+before(async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mmp-theme-"));
+  const out = join(dir, "ui.mjs");
+  execFileSync(
+    process.execPath,
+    [
+      "node_modules/esbuild/bin/esbuild",
+      "src/admin-ui.ts",
+      "--bundle",
+      "--format=esm",
+      `--outfile=${out}`,
+      "--platform=neutral",
+    ],
+    { cwd: process.cwd() }
+  );
+  const mod = await import(pathToFileURL(out).href);
+  renderAdmin = mod.renderAdmin;
+});
 
 /** Pull the first <script> block out of the head, which is the theme bootstrap. */
-function bootstrapScript(): string {
-  const head = ADMIN_HTML.slice(0, ADMIN_HTML.indexOf("<style>"));
+function bootstrapScript(html: string): string {
+  const head = html.slice(0, html.indexOf("<style>"));
   const match = head.match(/<script>([\s\S]*?)<\/script>/);
   assert.ok(match, "bootstrap script not found in <head>");
   return match![1]!;
@@ -48,8 +76,9 @@ function run(saved: string | null, systemPrefersLight: boolean): FakeResult {
     },
   };
 
+  const script = bootstrapScript(renderAdmin("en"));
   // eslint-disable-next-line no-new-func
-  const fn = new Function("window", "document", "localStorage", bootstrapScript());
+  const fn = new Function("window", "document", "localStorage", script);
   fn(win, doc, storage);
 
   return { theme: attrs["data-theme"] ?? "", mode: attrs["data-theme-mode"] ?? "", stored };
@@ -101,8 +130,15 @@ test("a junk saved value falls back to auto", () => {
 });
 
 test("the panel exposes a three-state theme control", () => {
-  assert.match(ADMIN_HTML, /const THEME_MODES = \["auto", "light", "dark"\]/);
-  assert.match(ADMIN_HTML, /跟随系统/);
+  const html = renderAdmin("en");
+  assert.match(html, /const THEME_MODES = \["auto", "light", "dark"\]/);
+  assert.match(html, /theme\.mode\.auto/);
   // The OS change listener must only repaint while in auto mode.
-  assert.match(ADMIN_HTML, /addEventListener\("change"/);
+  assert.match(html, /addEventListener\("change"/);
+});
+
+test("every locale declares its language on the root element", () => {
+  for (const locale of ["en", "zh", "ja", "de", "fr"]) {
+    assert.match(renderAdmin(locale), new RegExp(`<html lang="${locale}"`));
+  }
 });

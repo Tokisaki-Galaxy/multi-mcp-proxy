@@ -151,6 +151,76 @@ test("serves the admin panel without auth", async () => {
   assert.match(await res.text(), /multi-mcp-proxy/);
 });
 
+test("admin panel follows Accept-Language", async () => {
+  const cases: Array<[string, string, RegExp]> = [
+    ["ja", "ja,en;q=0.8", /<html lang="ja"/],
+    ["de", "de-DE,de;q=0.9", /<html lang="de"/],
+    ["fr", "fr", /<html lang="fr"/],
+    ["zh", "zh-CN", /<html lang="zh"/],
+    ["en", "pt-BR", /<html lang="en"/],
+  ];
+  for (const [label, header, pattern] of cases) {
+    const res = await fetch(base + "/admin", { headers: { "accept-language": header } });
+    const html = await res.text();
+    assert.equal(res.status, 200, label);
+    assert.match(html, pattern, label);
+    assert.equal(res.headers.get("content-language"), label, label);
+    assert.match(res.headers.get("vary") ?? "", /Accept-Language/i, label);
+  }
+});
+
+test("an explicit ?lang wins and is persisted in a cookie", async () => {
+  const res = await fetch(base + "/admin?lang=ja", {
+    headers: { "accept-language": "de" },
+  });
+  assert.equal(res.headers.get("content-language"), "ja");
+  const cookie = res.headers.get("set-cookie") ?? "";
+  assert.match(cookie, /mmp_lang=ja/);
+  assert.match(cookie, /Max-Age=/);
+  await res.text();
+});
+
+test("the stored cookie beats the browser preference", async () => {
+  const res = await fetch(base + "/admin", {
+    headers: { "accept-language": "de", cookie: "mmp_lang=fr" },
+  });
+  assert.equal(res.headers.get("content-language"), "fr");
+  await res.text();
+  // A cookie read must not re-set the cookie, or every page load would rewrite it.
+  assert.equal(res.headers.get("set-cookie"), null);
+});
+
+test("a junk lang parameter falls back instead of breaking", async () => {
+  const res = await fetch(base + "/admin?lang=klingon", {
+    headers: { "accept-language": "ja" },
+  });
+  assert.equal(res.headers.get("content-language"), "ja");
+  assert.equal(res.headers.get("set-cookie"), null);
+  await res.text();
+});
+
+test("api errors are localized", async () => {
+  const res = await fetch(base + "/api/services", {
+    headers: { "accept-language": "ja" },
+  });
+  assert.equal(res.status, 401);
+  const body = (await res.json()) as any;
+  // Japanese catalog for api.unauthorized is 未認証.
+  assert.match(body.error, /認証/);
+});
+
+test("mcp route errors stay in English", async () => {
+  // The consumer is a machine, so these are deliberately not translated.
+  const res = await fetch(base + "/nope/mcp", {
+    method: "POST",
+    headers: { "x-proxy-key": PROXY_KEY, "content-type": "application/json", "accept-language": "ja" },
+    body: "{}",
+  });
+  assert.equal(res.status, 404);
+  const body = (await res.json()) as any;
+  assert.match(body.error, /Unknown service/);
+});
+
 test("creates a service", async () => {
   const res = await api("/api/services", {
     id: "svc",
@@ -270,10 +340,14 @@ test("usage sync reads real numbers through a configured probe", async () => {
 });
 
 test("usage sync explains itself when no probe is configured", async () => {
-  const res = await api("/api/services/svc/keys/sync", {});
+  const res = await fetch(base + "/api/services/svc/keys/sync", {
+    method: "POST",
+    headers: { "x-proxy-key": PROXY_KEY, "accept-language": "ja" },
+  });
   assert.equal(res.status, 400);
   const body = (await res.json()) as any;
-  assert.match(body.error, /余额查询接口/);
+  // Japanese catalog for api.noUsageProbe mentions the balance endpoint.
+  assert.match(body.error, /エンドポイント/);
 });
 
 test("rejects a usage probe without a readable path", async () => {
