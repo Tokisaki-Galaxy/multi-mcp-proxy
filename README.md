@@ -140,8 +140,12 @@ https://你的域名/服务ID/mcp
 ```bash
 pnpm dev          # 本地起服务
 pnpm typecheck    # 类型检查
-node --test test # 单元测试
+pnpm test         # 单元测试与 Miniflare 集成测试
+pnpm e2e          # 打真实 Exa 端点，验证换 key 重放
+pnpm check:ui     # 检查面板内联脚本语法
 ```
+
+测试直接用 Node 自带的运行器，不需要额外装 vitest。`pnpm test` 会跑 73 个用例，其中集成测试会在 Miniflare 里拉起真实的 KV 和 SQLite Durable Object。
 
 判定逻辑在 `src/classify.ts`，转发与重放在 `src/forward.ts`，密钥池在 `src/pool.ts`。
 
