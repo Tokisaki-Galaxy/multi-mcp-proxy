@@ -4,7 +4,17 @@
  * The page is public because a browser cannot attach a custom header on
  * navigation. It then asks for the proxy key and keeps it in localStorage,
  * attaching it as `x-proxy-key` on every API call.
+ *
+ * Localization strategy: the server renders every static string from the
+ * catalog for the negotiated locale, and also embeds the same catalog as JSON so
+ * the client can format dynamic messages without a second request. Switching
+ * language is a plain navigation to `?lang=xx`, which keeps the whole thing
+ * working with JavaScript disabled and avoids maintaining a second renderer.
  */
+
+import type { LocaleCode } from "./i18n";
+import { catalogFor, LOCALES, t } from "./i18n";
+import { localeOptions } from "./i18n/locale";
 
 const CSS = `
   :root {
@@ -103,18 +113,41 @@ const CSS = `
   .warnbox { border-left: 3px solid var(--warn); background: rgba(245,181,68,.07); padding: 10px 12px; font-size: 12.5px; color: var(--muted); border-radius: 4px; }
   [data-theme="light"] .warnbox { background: rgba(168,103,0,.06); }
   .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  select#langSelect { width: auto; min-width: 110px; }
 `;
 
-const HTML = `<!doctype html>
-<html lang="zh-CN" data-theme="dark">
+/** Escape a value for use in HTML text or a quoted attribute. */
+export function esc(value: unknown): string {
+  return String(value == null ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
+ * Serialize the catalog for embedding in a <script> tag.
+ * `<` is escaped so a translation containing `</script>` cannot break out.
+ */
+function embedCatalog(locale: LocaleCode): string {
+  return JSON.stringify(catalogFor(locale))
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+export function renderAdmin(locale: LocaleCode): string {
+  const s = (key: Parameters<typeof t>[1], vars?: Record<string, string | number>) => esc(t(locale, key, vars));
+
+  return `<!doctype html>
+<html lang="${locale}" data-theme="dark">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>multi-mcp-proxy 控制台</title>
+<title>multi-mcp-proxy</title>
 <script>
-  // Resolve the theme before first paint so there is no flash.
-  // Saved value is "auto", "light" or "dark"; missing means auto, which is the
-  // default so the panel matches the operating system out of the box.
   (function () {
     var saved = null;
     try { saved = localStorage.getItem("mmp_theme"); } catch (e) {}
@@ -132,21 +165,22 @@ const HTML = `<!doctype html>
   <header>
     <div>
       <h1>multi-mcp-proxy</h1>
-      <div class="sub">多服务 MCP 透明反代与密钥池</div>
+      <div class="sub">${s("app.subtitle")}</div>
     </div>
     <div class="row" style="flex:0 0 auto">
-      <button id="themeBtn" class="ghost" onclick="toggleTheme()" title="切换主题">跟随系统</button>
-      <button id="logoutBtn" class="ghost hidden" onclick="logout()">注销</button>
+      <select id="langSelect" onchange="switchLocale(this.value)" title="${s("lang.label")}">${localeOptions(locale)}</select>
+      <button id="themeBtn" class="ghost" onclick="toggleTheme()" title="${s("theme.title.auto", { resolved: t(locale, "theme.resolved.dark") })}"></button>
+      <button id="logoutBtn" class="ghost hidden" onclick="logout()">${s("action.logout")}</button>
     </div>
   </header>
 
   <div class="card" id="loginCard">
     <form class="row" onsubmit="login(); return false;">
       <label class="field" style="flex:3">
-        <span>代理密钥 x-proxy-key</span>
-        <input id="authInput" type="password" autocomplete="off" placeholder="粘贴部署时设置的 PROXY_KEY" />
+        <span>${s("login.field")}</span>
+        <input id="authInput" type="password" autocomplete="off" placeholder="${s("login.placeholder")}" />
       </label>
-      <button style="align-self:flex-end">进入</button>
+      <button style="align-self:flex-end">${s("login.submit")}</button>
     </form>
     <div class="msg" id="loginMsg"></div>
   </div>
@@ -154,63 +188,63 @@ const HTML = `<!doctype html>
   <div id="app" class="hidden">
     <div class="card">
       <div class="row" style="justify-content:space-between">
-        <div class="svc-title">新增服务</div>
+        <div class="svc-title">${s("svc.new")}</div>
         <select id="preset" style="width:auto" onchange="applyPreset()">
-          <option value="">从预置选择…</option>
+          <option value="">${s("svc.preset.none")}</option>
           <option value="tavily">Tavily</option>
           <option value="firecrawl">Firecrawl</option>
           <option value="exa">Exa</option>
-          <option value="custom">自定义</option>
+          <option value="custom">${s("svc.preset.custom")}</option>
         </select>
       </div>
       <div class="divider"></div>
       <form onsubmit="addService(); return false;">
         <div class="row">
-          <label class="field"><span>服务 ID</span><input id="f-id" placeholder="tavily" /></label>
-          <label class="field"><span>显示名称</span><input id="f-name" placeholder="Tavily" /></label>
+          <label class="field"><span>${s("svc.field.id")}</span><input id="f-id" placeholder="tavily" /></label>
+          <label class="field"><span>${s("svc.field.name")}</span><input id="f-name" placeholder="Tavily" /></label>
         </div>
         <div class="row" style="margin-top:10px">
-          <label class="field" style="flex:3"><span>上游 MCP 地址</span><input id="f-url" placeholder="https://mcp.tavily.com/mcp" /></label>
+          <label class="field" style="flex:3"><span>${s("svc.field.url")}</span><input id="f-url" placeholder="https://mcp.tavily.com/mcp" /></label>
         </div>
         <div class="row" style="margin-top:10px">
-          <label class="field"><span>凭证位置</span>
+          <label class="field"><span>${s("svc.field.authType")}</span>
             <select id="f-authType">
-              <option value="header">请求头</option>
-              <option value="query">URL 参数</option>
+              <option value="header">${s("svc.field.authType.header")}</option>
+              <option value="query">${s("svc.field.authType.query")}</option>
             </select>
           </label>
-          <label class="field"><span>字段名</span><input id="f-authName" placeholder="x-api-key" /></label>
-          <label class="field"><span>前缀</span><input id="f-authPrefix" placeholder="留空 或 Bearer " /></label>
+          <label class="field"><span>${s("svc.field.authName")}</span><input id="f-authName" placeholder="x-api-key" /></label>
+          <label class="field"><span>${s("svc.field.authPrefix")}</span><input id="f-authPrefix" placeholder="${s("svc.field.authPrefixHint")}" /></label>
         </div>
         <div class="row" style="margin-top:10px">
-          <label class="field"><span>额度耗尽状态码</span><input id="f-exhausted" placeholder="402,432,433" /></label>
-          <label class="field"><span>限流状态码</span><input id="f-cooldown" placeholder="429" /></label>
-          <label class="field"><span>失效状态码</span><input id="f-invalid" placeholder="401" /></label>
+          <label class="field"><span>${s("svc.field.exhausted")}</span><input id="f-exhausted" placeholder="402,432,433" /></label>
+          <label class="field"><span>${s("svc.field.cooldown")}</span><input id="f-cooldown" placeholder="429" /></label>
+          <label class="field"><span>${s("svc.field.invalid")}</span><input id="f-invalid" placeholder="401" /></label>
         </div>
         <div class="divider"></div>
         <div class="row">
-          <div class="svc-title" style="flex:1">余额查询接口（可选）</div>
-          <button type="button" class="ghost sm" onclick="toggleUsageFields()" id="usageToggleBtn">展开</button>
+          <div class="svc-title" style="flex:1">${s("usage.title")}</div>
+          <button type="button" class="ghost sm" onclick="toggleUsageFields()" id="usageToggleBtn">${s("usage.expand")}</button>
         </div>
-        <div class="hint">上游有官方余额接口时填这里，面板的「同步余额」才能用。留空则该服务只能看密钥状态，看不到剩余额度。</div>
+        <div class="hint">${s("usage.hint")}</div>
         <div id="usageFields" class="hidden">
           <div class="row" style="margin-top:10px">
-            <label class="field" style="flex:3"><span>余额接口地址</span><input id="f-usageUrl" placeholder="https://api.firecrawl.dev/v2/team/credit-usage" /></label>
+            <label class="field" style="flex:3"><span>${s("usage.field.url")}</span><input id="f-usageUrl" placeholder="https://api.firecrawl.dev/v2/team/credit-usage" /></label>
           </div>
           <div class="row" style="margin-top:10px">
-            <label class="field"><span>认证头名称</span><input id="f-usageAuthName" placeholder="Authorization" /></label>
-            <label class="field"><span>认证前缀</span><input id="f-usageAuthPrefix" placeholder="Bearer " /></label>
+            <label class="field"><span>${s("usage.field.authName")}</span><input id="f-usageAuthName" placeholder="Authorization" /></label>
+            <label class="field"><span>${s("usage.field.authPrefix")}</span><input id="f-usageAuthPrefix" placeholder="Bearer " /></label>
           </div>
           <div class="row" style="margin-top:10px">
-            <label class="field"><span>已用字段路径</span><input id="f-usageUsed" placeholder="key.usage" /></label>
-            <label class="field"><span>上限字段路径</span><input id="f-usageLimit" placeholder="key.limit" /></label>
-            <label class="field"><span>上限备用路径</span><input id="f-usageLimitFallback" placeholder="account.plan_limit" /></label>
-            <label class="field"><span>剩余字段路径</span><input id="f-usageRemaining" placeholder="data.remainingCredits" /></label>
+            <label class="field"><span>${s("usage.field.used")}</span><input id="f-usageUsed" placeholder="key.usage" /></label>
+            <label class="field"><span>${s("usage.field.limit")}</span><input id="f-usageLimit" placeholder="key.limit" /></label>
+            <label class="field"><span>${s("usage.field.limitFallback")}</span><input id="f-usageLimitFallback" placeholder="account.plan_limit" /></label>
+            <label class="field"><span>${s("usage.field.remaining")}</span><input id="f-usageRemaining" placeholder="data.remainingCredits" /></label>
           </div>
-          <div class="hint">路径用点号分隔，例如 <span class="kbd">data.remainingCredits</span>。上限为 null 时会尝试「上限备用路径」，Tavily 的 key.limit 就常常是 null。填了「剩余字段」时，已用量由上限减剩余推出来。</div>
+          <div class="hint">${s("usage.hint.paths")}</div>
         </div>
         <div class="toolbar">
-          <button type="submit">保存服务</button>
+          <button type="submit">${s("svc.save")}</button>
         </div>
         <div class="msg" id="svcMsg"></div>
       </form>
@@ -218,28 +252,60 @@ const HTML = `<!doctype html>
 
     <div class="card">
       <div class="row" style="justify-content:space-between">
-        <div class="svc-title">服务列表</div>
-        <button class="ghost sm" onclick="loadServices()">刷新</button>
+        <div class="svc-title">${s("svc.list")}</div>
+        <button class="ghost sm" onclick="loadServices()">${s("action.refresh")}</button>
       </div>
       <div class="divider"></div>
-      <div id="svcList" class="empty">加载中…</div>
+      <div id="svcList" class="empty">${s("state.loading")}</div>
       <div class="msg" id="listMsg"></div>
     </div>
 
-    <div class="card warnbox">
-      客户端接入地址形如 <span class="kbd">https://你的域名/服务ID/mcp</span>，请求头带 <span class="kbd">x-proxy-key</span>。
-    </div>
+    <div class="card warnbox">${s("notice.endpoint", { service: "tavily" })}</div>
   </div>
 </div>
 
+<script id="mmp-catalog" type="application/json">${embedCatalog(locale)}</script>
 <script>
 const AUTH_STORE = "mmp_proxy_key";
+const LOCALE = ${JSON.stringify(locale)};
+const CAT = JSON.parse(document.getElementById("mmp-catalog").textContent);
 const $ = (id) => document.getElementById(id);
+
+/** Format a catalog entry. Falls back to the key so nothing ever renders empty. */
+function tr(key, vars) {
+  var template = CAT[key] || key;
+  if (!vars) return template;
+  return template.replace(/\\{(\\w+)\\}/g, function (whole, name) {
+    return vars[name] === undefined ? whole : String(vars[name]);
+  });
+}
+
+/** Plural-aware lookup against the same flat table. */
+function trn(key, count, vars) {
+  var cat = "other";
+  try {
+    cat = new Intl.PluralRules(LOCALE).select(count);
+  } catch (e) {
+    cat = count === 1 ? "one" : "other";
+  }
+  var merged = Object.assign({ n: count }, vars || {});
+  var order = [key + "." + cat, key + ".other", key + ".one"];
+  for (var i = 0; i < order.length; i++) {
+    if (CAT[order[i]]) return tr(order[i], merged);
+  }
+  return tr(key, merged);
+}
 
 function esc(s) {
   return String(s == null ? "" : s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function switchLocale(code) {
+  var url = new URL(window.location.href);
+  url.searchParams.set("lang", code);
+  window.location.href = url.toString();
 }
 
 function setMsg(id, text, isErr) {
@@ -252,20 +318,25 @@ function setMsg(id, text, isErr) {
 async function api(path, options) {
   const headers = Object.assign({}, (options && options.headers) || {}, {
     "x-proxy-key": localStorage.getItem(AUTH_STORE) || "",
+    "accept-language": LOCALE,
   });
   if (options && options.body) headers["content-type"] = "application/json";
   const res = await fetch(path, Object.assign({}, options, { headers }));
   const data = await res.json().catch(() => ({}));
   if (res.status === 401) {
     logout();
-    throw new Error("密钥无效");
+    throw new Error(tr("login.invalid"));
   }
   if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
   return data;
 }
 
 const THEME_MODES = ["auto", "light", "dark"];
-const THEME_LABEL = { auto: "跟随系统", light: "浅色", dark: "深色" };
+const THEME_LABEL = {
+  auto: tr("theme.mode.auto"),
+  light: tr("theme.mode.light"),
+  dark: tr("theme.mode.dark"),
+};
 
 function prefersLight() {
   return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches);
@@ -300,15 +371,14 @@ function syncThemeButton() {
   const resolved = resolveTheme(mode);
   btn.textContent = THEME_LABEL[mode];
   if (mode === "auto") {
-    btn.title = "跟随系统（当前" + (resolved === "light" ? "浅色" : "深色") + "），点击切到浅色";
+    btn.title = tr("theme.title.auto", { resolved: tr("theme.resolved." + resolved) });
   } else if (mode === "light") {
-    btn.title = "固定浅色，点击切到深色";
+    btn.title = tr("theme.title.light");
   } else {
-    btn.title = "固定深色，点击切回跟随系统";
+    btn.title = tr("theme.title.dark");
   }
 }
 
-/** Re-resolve when the OS flips while the page is open and the mode is auto. */
 if (window.matchMedia) {
   const query = window.matchMedia("(prefers-color-scheme: light)");
   const onChange = () => {
@@ -378,16 +448,14 @@ const PRESETS = {
 };
 
 /** Exa has no per-key balance endpoint on regular keys, only Team Management. */
-const USAGE_PRESET_NOTE = {
-  exa: "Exa 普通 API key 没有官方余额接口，只有开通 Team Management 后才有，因此这个服务的余额需要留空。",
-};
+const USAGE_PRESET_NOTE = { exa: tr("usage.presetNote.exa") };
 
 function toggleUsageFields() {
   const box = $("usageFields");
   const btn = $("usageToggleBtn");
   const open = box.classList.contains("hidden");
   box.classList.toggle("hidden", !open);
-  btn.textContent = open ? "收起" : "展开";
+  btn.textContent = open ? tr("usage.collapse") : tr("usage.expand");
 }
 
 function fillUsage(u) {
@@ -399,7 +467,6 @@ function fillUsage(u) {
   $("f-usageLimitFallback").value = u ? u.limitFallback : "";
   $("f-usageRemaining").value = u ? u.remaining : "";
 
-  // Open the section when there is something to show, so preset users see it.
   if (u && $("usageFields").classList.contains("hidden")) toggleUsageFields();
 }
 
@@ -473,7 +540,7 @@ async function addService() {
   };
   try {
     await api("/api/services", { method: "POST", body: JSON.stringify(body) });
-    setMsg("svcMsg", usage ? "已保存，带余额接口" : "已保存（无余额接口）", false);
+    setMsg("svcMsg", tr(usage ? "svc.savedWithUsage" : "svc.savedWithoutUsage"), false);
     loadServices();
   } catch (e) {
     setMsg("svcMsg", e.message, true);
@@ -483,32 +550,44 @@ async function addService() {
 function ago(secs) {
   if (!secs) return "-";
   const d = Math.max(0, Math.floor(Date.now() / 1000) - secs);
-  if (d < 60) return d + " 秒前";
-  if (d < 3600) return Math.floor(d / 60) + " 分钟前";
-  if (d < 86400) return Math.floor(d / 3600) + " 小时前";
-  return Math.floor(d / 86400) + " 天前";
+  if (d < 60) return trn("keys.ago.seconds", d);
+  if (d < 3600) return trn("keys.ago.minutes", Math.floor(d / 60));
+  if (d < 86400) return trn("keys.ago.hours", Math.floor(d / 3600));
+  return trn("keys.ago.days", Math.floor(d / 86400));
 }
 
 function quotaText(k) {
-  if (k.quotaLimit == null) return '<span class="muted">未知</span>';
+  if (k.quotaLimit == null) return '<span class="muted">' + esc(tr("state.unknown")) + "</span>";
   const left = Math.max(0, (k.quotaLimit || 0) - (k.quotaUsed || 0));
-  return '<code>' + left + '</code> / ' + k.quotaLimit;
+  return "<code>" + left + "</code> / " + k.quotaLimit;
+}
+
+function statusLabel(status) {
+  const key = "keys.status." + status;
+  return CAT[key] ? tr(key) : status;
 }
 
 function keyRows(serviceId, keys) {
-  if (!keys.length) return '<div class="empty">还没有密钥</div>';
-  let html = '<table><thead><tr><th>密钥</th><th>备注</th><th>状态</th><th>余额</th><th>权重</th><th>最后使用</th><th></th></tr></thead><tbody>';
+  if (!keys.length) return '<div class="empty">' + esc(tr("keys.empty")) + "</div>";
+  let html = "<table><thead><tr>" +
+    "<th>" + esc(tr("keys.col.key")) + "</th>" +
+    "<th>" + esc(tr("keys.col.note")) + "</th>" +
+    "<th>" + esc(tr("keys.col.status")) + "</th>" +
+    "<th>" + esc(tr("keys.col.quota")) + "</th>" +
+    "<th>" + esc(tr("keys.col.weight")) + "</th>" +
+    "<th>" + esc(tr("keys.col.lastUsed")) + "</th>" +
+    "<th></th></tr></thead><tbody>";
   for (const k of keys) {
     html += "<tr>";
     html += "<td><code>" + esc(k.mask) + "</code></td>";
     html += '<td class="note">' + (k.label ? esc(k.label) : '<span class="muted">–</span>') + "</td>";
-    html += '<td><span class="badge ' + esc(k.status) + '">' + esc(k.status) + "</span></td>";
+    html += '<td><span class="badge ' + esc(k.status) + '">' + esc(statusLabel(k.status)) + "</span></td>";
     html += "<td>" + quotaText(k) + "</td>";
     html += "<td>" + esc(k.weight) + "</td>";
     html += '<td class="muted">' + ago(k.lastUsedAt) + "</td>";
     html += '<td style="text-align:right;white-space:nowrap">' +
-      '<button class="ghost sm" data-act="edit-note" data-svc="' + esc(serviceId) + '" data-key="' + esc(k.id) + '" data-label="' + esc(k.label || "") + '">备注</button> ' +
-      '<button class="danger sm" data-act="del-key" data-svc="' + esc(serviceId) + '" data-key="' + esc(k.id) + '">删除</button>' +
+      '<button class="ghost sm" data-act="edit-note" data-svc="' + esc(serviceId) + '" data-key="' + esc(k.id) + '" data-label="' + esc(k.label || "") + '">' + esc(tr("keys.note")) + "</button> " +
+      '<button class="danger sm" data-act="del-key" data-svc="' + esc(serviceId) + '" data-key="' + esc(k.id) + '">' + esc(tr("action.delete")) + "</button>" +
       "</td>";
     html += "</tr>";
   }
@@ -521,7 +600,7 @@ async function loadServices() {
     const list = $("svcList");
     if (!data.services.length) {
       list.className = "empty";
-      list.textContent = "还没有服务，先在上方新增一个。";
+      list.textContent = tr("svc.empty");
       return;
     }
     list.className = "";
@@ -533,23 +612,23 @@ async function loadServices() {
             '<div class="svc-title">' + esc(s.name) + ' <span class="muted">/' + esc(s.id) + '/mcp</span></div>' +
             '<div class="svc-url">' + esc(s.upstreamUrl) + "</div>" +
           "</div>" +
-          '<button class="danger sm" data-act="del-service" data-svc="' + esc(s.id) + '">删除服务</button>' +
+          '<button class="danger sm" data-act="del-service" data-svc="' + esc(s.id) + '">' + esc(tr("svc.delete")) + "</button>" +
         "</div>" +
         '<div class="stats" style="margin-top:10px">' +
-          "<span>总数 <b>" + st.total + "</b></span>" +
-          "<span>可用 <b>" + st.active + "</b></span>" +
-          "<span>冷却 <b>" + st.cooling + "</b></span>" +
-          "<span>耗尽 <b>" + st.exhausted + "</b></span>" +
-          "<span>失效 <b>" + st.invalid + "</b></span>" +
+          "<span>" + esc(tr("svc.stats.total")) + " <b>" + st.total + "</b></span>" +
+          "<span>" + esc(tr("svc.stats.active")) + " <b>" + st.active + "</b></span>" +
+          "<span>" + esc(tr("svc.stats.cooling")) + " <b>" + st.cooling + "</b></span>" +
+          "<span>" + esc(tr("svc.stats.exhausted")) + " <b>" + st.exhausted + "</b></span>" +
+          "<span>" + esc(tr("svc.stats.invalid")) + " <b>" + st.invalid + "</b></span>" +
         "</div>" +
         '<div class="divider"></div>' +
-        '<div class="keys" id="keys-' + esc(s.id) + '"><div class="empty">加载中…</div></div>' +
+        '<div class="keys" id="keys-' + esc(s.id) + '"><div class="empty">' + esc(tr("state.loading")) + "</div></div>" +
         '<div class="row" style="margin-top:12px">' +
-          '<textarea id="addkeys-' + esc(s.id) + '" placeholder="每行一个密钥。想加备注就在密钥后面跟一个逗号，例如：&#10;tvly-abc123,小号一号&#10;tvly-def456,备用"></textarea>' +
+          '<textarea id="addkeys-' + esc(s.id) + '" placeholder="' + esc(tr("keys.placeholder")) + '"></textarea>' +
         "</div>" +
         '<div class="toolbar">' +
-          '<button class="ghost sm" data-act="sync-keys" data-svc="' + esc(s.id) + '">同步余额</button>' +
-          '<button class="sm" data-act="add-keys" data-svc="' + esc(s.id) + '">添加密钥</button>' +
+          '<button class="ghost sm" data-act="sync-keys" data-svc="' + esc(s.id) + '">' + esc(tr("keys.sync")) + "</button>" +
+          '<button class="sm" data-act="add-keys" data-svc="' + esc(s.id) + '">' + esc(tr("keys.add")) + "</button>" +
         "</div>" +
         '<div class="msg" id="keymsg-' + esc(s.id) + '"></div>' +
       "</div>";
@@ -568,21 +647,21 @@ async function loadKeys(serviceId) {
     const data = await api("/api/services/" + encodeURIComponent(serviceId) + "/keys");
     host.innerHTML = keyRows(serviceId, data.keys || []);
   } catch (e) {
-    host.innerHTML = '<div class="empty">读取失败：' + esc(e.message) + "</div>";
+    host.innerHTML = '<div class="empty">' + esc(tr("keys.readFailed", { message: e.message })) + "</div>";
   }
 }
 
 async function addKeys(serviceId) {
   const box = $("addkeys-" + serviceId);
   const text = box.value.trim();
-  if (!text) return setMsg("keymsg-" + serviceId, "请先粘贴密钥", true);
+  if (!text) return setMsg("keymsg-" + serviceId, tr("keys.pasteFirst"), true);
   try {
     const res = await api("/api/services/" + encodeURIComponent(serviceId) + "/keys", {
       method: "POST",
       body: JSON.stringify({ keys: text }),
     });
     box.value = "";
-    setMsg("keymsg-" + serviceId, "新增 " + res.added + "，重复跳过 " + res.skipped, false);
+    setMsg("keymsg-" + serviceId, tr("keys.added", { added: res.added, skipped: res.skipped }), false);
     loadKeys(serviceId);
     loadServices();
   } catch (e) {
@@ -591,7 +670,7 @@ async function addKeys(serviceId) {
 }
 
 async function delKey(serviceId, keyId) {
-  if (!confirm("确认删除这个密钥？")) return;
+  if (!confirm(tr("keys.deleteConfirm"))) return;
   try {
     await api("/api/services/" + encodeURIComponent(serviceId) + "/keys", {
       method: "DELETE",
@@ -605,14 +684,14 @@ async function delKey(serviceId, keyId) {
 }
 
 async function editNote(serviceId, keyId, current) {
-  const next = prompt("备注（留空则清除）", current || "");
+  const next = prompt(tr("keys.notePrompt"), current || "");
   if (next === null) return;
   try {
     await api("/api/services/" + encodeURIComponent(serviceId) + "/keys/" + encodeURIComponent(keyId), {
       method: "PATCH",
       body: JSON.stringify({ label: next.trim() }),
     });
-    setMsg("keymsg-" + serviceId, "备注已更新", false);
+    setMsg("keymsg-" + serviceId, tr("keys.noteUpdated"), false);
     loadKeys(serviceId);
   } catch (e) {
     setMsg("keymsg-" + serviceId, e.message, true);
@@ -622,7 +701,7 @@ async function editNote(serviceId, keyId, current) {
 async function syncKeys(serviceId) {
   try {
     const res = await api("/api/services/" + encodeURIComponent(serviceId) + "/keys/sync", { method: "POST" });
-    setMsg("keymsg-" + serviceId, "同步 " + res.synced + "，失败 " + res.failed, false);
+    setMsg("keymsg-" + serviceId, tr("keys.synced", { synced: res.synced, failed: res.failed }), false);
     loadKeys(serviceId);
   } catch (e) {
     setMsg("keymsg-" + serviceId, e.message, true);
@@ -630,7 +709,7 @@ async function syncKeys(serviceId) {
 }
 
 async function delService(serviceId) {
-  if (!confirm("删除服务 " + serviceId + " 及其全部密钥？")) return;
+  if (!confirm(tr("svc.deleteConfirm", { id: serviceId }))) return;
   try {
     await api("/api/services/" + encodeURIComponent(serviceId), { method: "DELETE" });
     loadServices();
@@ -639,8 +718,6 @@ async function delService(serviceId) {
   }
 }
 
-/* One delegated listener keeps every dynamically rendered button working
-   without inline handlers, which would need quote escaping inside a template. */
 document.addEventListener("click", function (ev) {
   const btn = ev.target.closest("[data-act]");
   if (!btn) return;
@@ -657,5 +734,4 @@ if (localStorage.getItem(AUTH_STORE)) boot();
 </script>
 </body>
 </html>`;
-
-export const ADMIN_HTML = HTML;
+}

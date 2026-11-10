@@ -7,8 +7,9 @@ import {
   deleteService,
   isValidServiceId,
 } from "./registry";
-import { ADMIN_HTML } from "./admin-ui";
+import { renderAdmin } from "./admin-ui";
 import { parseKeyInput } from "./key-input";
+import { negotiate, t, isLocale, type LocaleCode, type MessageKey } from "./i18n";import { explicitLocale, langCookie, readCookie, LANG_COOKIE, LANG_QUERY } from "./i18n/locale";
 import type { ServiceConfig, QuotaRules, AuthStyle, UsageProbe } from "./types";
 import type { KeyPool } from "./pool";
 
@@ -21,7 +22,35 @@ type Env = {
   ENCRYPTION_KEY?: string;
 };
 
+type Ctx = {
+  req: {
+    header: (n: string) => string | undefined;
+    query: (n: string) => string | undefined;
+  };
+  env: Env;
+};
+
 const app = new Hono<{ Bindings: Env }>();
+
+/**
+ * Locale for this request.
+ *
+ * Explicit choice wins over the browser preference, so a shared link that pins
+ * `?lang=ja` renders in Japanese for everyone who opens it.
+ */
+function localeOf(c: Ctx): LocaleCode {
+  const explicit = explicitLocale(
+    c.req.query(LANG_QUERY),
+    readCookie(c.req.header("cookie"), LANG_COOKIE)
+  );
+  if (explicit) return explicit;
+  return negotiate(c.req.header("accept-language"));
+}
+
+/** Localized JSON error. */
+function fail(c: any, status: number, key: MessageKey, vars?: Record<string, string | number>) {
+  return c.json({ error: t(localeOf(c), key, vars) }, status);
+}
 
 /** Constant-time-ish comparison for the proxy credential. */
 function safeEqual(a: string, b: string): boolean {
@@ -73,14 +102,31 @@ app.get("/", (c) =>
 // ---------------------------------------------------------------------------
 // Public: admin page. It is a static shell that asks for the proxy key, because
 // a browser cannot attach a custom header on navigation.
+//
+// Rendering happens server side so the first paint is already translated, and a
+// language switch is a plain navigation rather than a client-side re-render.
 // ---------------------------------------------------------------------------
-app.get("/admin", (c) => c.html(ADMIN_HTML));
+app.get("/admin", (c) => {
+  const locale = localeOf(c);
+  const requested = c.req.query(LANG_QUERY);
+  const headers: Record<string, string> = {
+    "content-type": "text/html; charset=UTF-8",
+    // Content varies by language, so caches must key on it.
+    vary: "Accept-Language, Cookie",
+    "content-language": locale,
+  };
+  // Persist only a choice the user actually made, and only when the value was
+  // one we support. Writing a cookie for a junk `?lang=` would poison the
+  // preference until the user cleared it by hand.
+  if (isLocale(requested)) headers["set-cookie"] = langCookie(locale);
+  return new Response(renderAdmin(locale), { status: 200, headers });
+});
 
 // ---------------------------------------------------------------------------
 // Auth guard for everything under /api and every /:service/mcp route.
 // ---------------------------------------------------------------------------
 app.use("/api/*", async (c, next) => {
-  if (!authorized(c)) return c.json({ error: "Unauthorized" }, 401);
+  if (!authorized(c)) return fail(c, 401, "api.unauthorized");
   return next();
 });
 
@@ -100,7 +146,7 @@ app.get("/api/services", async (c) => {
 
 app.post("/api/services", async (c) => {
   const body = await c.req.json<Partial<ServiceConfig>>().catch(() => null);
-  if (!body) return c.json({ error: "Invalid JSON body" }, 400);
+  if (!body) return fail(c, 400, "api.invalidJson");
 
   const id = String(body.id ?? "").trim().toLowerCase();
   if (!isValidServiceId(id)) {
@@ -116,7 +162,7 @@ app.post("/api/services", async (c) => {
   const isHttps = /^https:\/\/[^\s]+$/.test(upstreamUrl);
   const isLoopbackHttp = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/.test(upstreamUrl);
   if (!isHttps && !isLoopbackHttp) {
-    return c.json({ error: "upstreamUrl must be an https URL" }, 400);
+    return fail(c, 400, "api.urlHttps");
   }
 
   const existing = await getService(c.env.REGISTRY, id);
@@ -124,9 +170,9 @@ app.post("/api/services", async (c) => {
 
   const auth: AuthStyle = body.auth && typeof body.auth === "object" ? (body.auth as AuthStyle) : DEFAULT_AUTH;
   if (auth.type !== "header" && auth.type !== "query") {
-    return c.json({ error: "auth.type must be 'header' or 'query'" }, 400);
+    return fail(c, 400, "api.authType");
   }
-  if (!auth.name) return c.json({ error: "auth.name is required" }, 400);
+  if (!auth.name) return fail(c, 400, "api.authNameRequired");
 
   const quota: QuotaRules = { ...DEFAULT_QUOTA, ...(body.quota ?? {}) };
 
@@ -140,13 +186,13 @@ app.post("/api/services", async (c) => {
     const probeHttps = /^https:\/\/[^\s]+$/.test(usageUrl);
     const probeLoopback = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/.test(usageUrl);
     if (!probeHttps && !probeLoopback) {
-      return c.json({ error: "usage.url must be an https URL" }, 400);
+      return fail(c, 400, "api.usageUrlHttps");
     }
     const style: AuthStyle = raw.style && typeof raw.style === "object" ? raw.style : auth;
     if (style.type !== "header" && style.type !== "query") {
-      return c.json({ error: "usage.style.type must be 'header' or 'query'" }, 400);
+      return fail(c, 400, "api.usageAuthType");
     }
-    if (!style.name) return c.json({ error: "usage.style.name is required" }, 400);
+    if (!style.name) return fail(c, 400, "api.usageAuthNameRequired");
 
     const usedPath = raw.usedPath ? String(raw.usedPath).trim() : undefined;
     const limitPath = raw.limitPath ? String(raw.limitPath).trim() : undefined;
@@ -182,7 +228,7 @@ app.post("/api/services", async (c) => {
 app.delete("/api/services/:id", async (c) => {
   const id = c.req.param("id");
   const removed = await deleteService(c.env.REGISTRY, id);
-  if (!removed) return c.json({ error: "Service not found" }, 404);
+  if (!removed) return fail(c, 404, "api.serviceNotFound");
   return c.json({ deleted: id });
 });
 
@@ -192,7 +238,7 @@ app.delete("/api/services/:id", async (c) => {
 app.get("/api/services/:id/keys", async (c) => {
   const id = c.req.param("id");
   const service = await getService(c.env.REGISTRY, id);
-  if (!service) return c.json({ error: "Service not found" }, 404);
+  if (!service) return fail(c, 404, "api.serviceNotFound");
   const keys = await poolFor(c.env, id).listKeys();
   return c.json({ serviceId: id, keys: keys.map((k) => ({ ...k, serviceId: id })) });
 });
@@ -200,13 +246,13 @@ app.get("/api/services/:id/keys", async (c) => {
 app.post("/api/services/:id/keys", async (c) => {
   const id = c.req.param("id");
   const service = await getService(c.env.REGISTRY, id);
-  if (!service) return c.json({ error: "Service not found" }, 404);
+  if (!service) return fail(c, 404, "api.serviceNotFound");
 
   const body = await c.req.json<{ keys?: unknown; weight?: number }>().catch(() => null);
-  if (!body) return c.json({ error: "Invalid JSON body" }, 400);
+  if (!body) return fail(c, 400, "api.invalidJson");
 
   const keys = parseKeyInput(body.keys);
-  if (keys.length === 0) return c.json({ error: "No keys provided" }, 400);
+  if (keys.length === 0) return fail(c, 400, "api.noKeys");
 
   // A label may repeat across different secrets, but not within one batch: a
   // duplicated label would make the panel unreadable without telling anyone.
@@ -215,7 +261,7 @@ app.post("/api/services/:id/keys", async (c) => {
     if (!entry.label) continue;
     const key = entry.label.toLowerCase();
     if (seenLabels.has(key)) {
-      return c.json({ error: `Duplicated note in this batch: ${entry.label}` }, 400);
+      return fail(c, 400, "api.duplicateNote", { label: entry.label });
     }
     seenLabels.add(key);
   }
@@ -228,7 +274,7 @@ app.post("/api/services/:id/keys", async (c) => {
 app.delete("/api/services/:id/keys", async (c) => {
   const id = c.req.param("id");
   const body = await c.req.json<{ ids?: unknown }>().catch(() => null);
-  if (!body || !Array.isArray(body.ids)) return c.json({ error: "Body must be { ids: string[] }" }, 400);
+  if (!body || !Array.isArray(body.ids)) return fail(c, 400, "api.idsRequired");
   const removed = await poolFor(c.env, id).deleteKeys(body.ids.map(String));
   return c.json({ deleted: removed });
 });
@@ -237,25 +283,18 @@ app.patch("/api/services/:id/keys/:keyId", async (c) => {
   const id = c.req.param("id");
   const keyId = c.req.param("keyId");
   const body = await c.req.json<{ weight?: number; status?: string; label?: string }>().catch(() => null);
-  if (!body) return c.json({ error: "Invalid JSON body" }, 400);
+  if (!body) return fail(c, 400, "api.invalidJson");
   const ok = await poolFor(c.env, id).patchKey(keyId, body);
-  if (!ok) return c.json({ error: "Key not found" }, 404);
+  if (!ok) return fail(c, 404, "api.keyNotFound");
   return c.json({ updated: keyId });
 });
 
 app.post("/api/services/:id/keys/sync", async (c) => {
   const id = c.req.param("id");
   const service = await getService(c.env.REGISTRY, id);
-  if (!service) return c.json({ error: "Service not found" }, 404);
+  if (!service) return fail(c, 404, "api.serviceNotFound");
   if (!service.usage) {
-    return c.json(
-      {
-        error: `服务 ${id} 没有配置余额查询接口，无法同步。` +
-          `在上方「余额查询接口」里填写该服务的官方额度端点即可。` +
-          `注意 Exa 的普通 API key 没有官方余额接口，只能开通 Team Management 后才有。`,
-      },
-      400
-    );
+    return fail(c, 400, "api.noUsageProbe", { id });
   }
   const result = await poolFor(c.env, id).syncUsage(service.usage);
   return c.json(result);
@@ -264,6 +303,11 @@ app.post("/api/services/:id/keys/sync", async (c) => {
 // ---------------------------------------------------------------------------
 // The proxy itself. Every method is forwarded: POST for JSON-RPC, GET for
 // server-initiated streams, DELETE for session termination.
+//
+// Errors on this route stay in English on purpose. The consumer is an MCP client
+// or an integration, never a human reading the panel, and MCP error payloads are
+// conventionally English. Translating them would grow the catalogs and give no
+// benefit to the calling model.
 // ---------------------------------------------------------------------------
 app.all("/:service/mcp", async (c) => {
   if (!authorized(c)) return c.json({ error: "Unauthorized" }, 401);
@@ -274,6 +318,25 @@ app.all("/:service/mcp", async (c) => {
   if (!service.enabled) return c.json({ error: `Service '${serviceId}' is disabled` }, 503);
 
   const pool = poolFor(c.env, serviceId);
+
+  // TEMP-SESSION-PROBE: log what the caller sent so we can tell whether the
+  // portal reuses one upstream session or opens a fresh one per tool call.
+  {
+    const sid = c.req.header("mcp-session-id") ?? "";
+    const method = c.req.method;
+    let jrpc = "";
+    try {
+      const clone = c.req.raw.clone();
+      const body = await clone.json<any>();
+      jrpc = body?.method ?? "";
+    } catch {
+      /* GET or non-JSON body */
+    }
+    console.log(
+      `SESSIONPROBE svc=${serviceId} http=${method} rpc=${jrpc || "-"} sid=${sid ? sid.slice(0, 16) : "NONE"}`
+    );
+  }
+
   const outcome = await forwardMCP(c.req.raw, service, pool);
 
   const headers = new Headers(outcome.response.headers);
@@ -287,11 +350,11 @@ app.all("/:service/mcp", async (c) => {
   });
 });
 
-app.notFound((c) => c.json({ error: "Not found" }, 404));
+app.notFound((c) => fail(c, 404, "api.notFound"));
 
 app.onError((err, c) => {
   console.error("[multi-mcp-proxy]", err);
-  return c.json({ error: "Internal proxy error" }, 500);
+  return fail(c, 500, "api.internal");
 });
 
 export default app;
