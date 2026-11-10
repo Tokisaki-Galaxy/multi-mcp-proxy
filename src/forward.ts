@@ -16,6 +16,7 @@
 
 import type { ClassifyResult, QuotaRules, SelectResult, ServiceConfig } from "./types";
 import { classifyHttp, classifyMcpResult } from "./classify";
+import { collectCandidateIds, collectResultIds } from "./pool-logic";
 
 /** Abort the upstream header phase after this long. */
 const HEADER_TIMEOUT_MS = 120_000;
@@ -46,6 +47,15 @@ const HOP_BY_HOP = new Set([
 export interface PoolHandle {
   pick(): Promise<SelectResult | null>;
   report(keyId: string, result: ClassifyResult, rules: QuotaRules): Promise<void>;
+  /** Which key minted any of these ids, or null when none is known. */
+  lookupAffinity?(ids: string[]): Promise<string | null>;
+  /** Remember that a key minted these ids. */
+  recordAffinity?(ids: string[], keyId: string, ttlSecs: number): Promise<number>;
+  /** Resolve a pinned key, reporting why it cannot serve when it cannot. */
+  pickPinned?(keyId: string): Promise<
+    | { ok: true; key: SelectResult }
+    | { ok: false; reason: "missing" | "unusable"; status: string; cooldownUntil: number }
+  >;
 }
 
 export interface ForwardOutcome {
@@ -53,6 +63,8 @@ export interface ForwardOutcome {
   keyId: string | null;
   attempts: number;
   verdicts: ClassifyResult[];
+  /** True when the key was chosen by a resource binding rather than rotation. */
+  pinned?: boolean;
 }
 
 function upstreamHeaders(
@@ -194,6 +206,24 @@ function ssePayloads(text: string): unknown[] {
 }
 
 /**
+ * Pull the parsed JSON-RPC objects out of a peeked response body.
+ *
+ * Shared by failure classification and by affinity extraction so the body is
+ * only ever parsed once.
+ */
+function payloadsOf(contentType: string, text: string): unknown[] {
+  if (contentType.includes("text/event-stream")) return ssePayloads(text);
+  if (contentType.includes("application/json")) {
+    try {
+      return [JSON.parse(text)];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+/**
  * Decide whether a peeked upstream response should cause a different key to be
  * tried. Returns null when the response is fine and should be passed through.
  */
@@ -202,24 +232,59 @@ function judgePeek(
   contentType: string,
   text: string
 ): ClassifyResult | null {
-  if (contentType.includes("text/event-stream")) {
-    for (const payload of ssePayloads(text)) {
-      const verdict = classifyMcpResult(payload, service.quota);
-      if (verdict) return verdict;
-    }
-    return null;
+  for (const payload of payloadsOf(contentType, text)) {
+    const verdict = classifyMcpResult(payload, service.quota);
+    if (verdict) return verdict;
   }
-
-  if (contentType.includes("application/json")) {
-    try {
-      const payload = JSON.parse(text);
-      return classifyMcpResult(payload, service.quota);
-    } catch {
-      return null;
-    }
-  }
-
   return null;
+}
+
+/** Minimal view of the inbound request needed for affinity. */
+interface RequestInfo {
+  /** JSON-RPC id, echoed on proxy-generated errors. */
+  jsonrpcId: unknown;
+  /** `params.arguments` for a tool call; undefined for everything else. */
+  args: unknown;
+}
+
+function readRequestInfo(raw: ArrayBuffer | null): RequestInfo {
+  if (!raw || raw.byteLength === 0) return { jsonrpcId: null, args: undefined };
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(raw));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { jsonrpcId: null, args: undefined };
+    }
+    const record = parsed as Record<string, unknown>;
+    const params = record.params;
+    const args =
+      params && typeof params === "object" ? (params as Record<string, unknown>).arguments : undefined;
+    return { jsonrpcId: record.id ?? null, args };
+  } catch {
+    return { jsonrpcId: null, args: undefined };
+  }
+}
+
+/**
+ * Error returned when a request references a resource whose owning key can no
+ * longer serve it.
+ *
+ * A JSON-RPC error at HTTP 200 is deliberate: clients surface it as a tool
+ * failure with our message intact, whereas an HTTP error status gets flattened
+ * into "request failed with status N" and the reason is lost.
+ */
+function affinityError(jsonrpcId: unknown, message: string, reason: string): Response {
+  return new Response(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: jsonrpcId,
+      error: {
+        code: -32001,
+        message,
+        data: { reason, retryable: reason === "cooling" },
+      },
+    }),
+    { status: 200, headers: { "content-type": "application/json" } }
+  );
 }
 
 function shouldReplay(verdict: ClassifyResult, retryOn5xx: boolean): boolean {
@@ -232,6 +297,10 @@ function shouldReplay(verdict: ClassifyResult, retryOn5xx: boolean): boolean {
 /**
  * Forward one MCP request to the upstream, rotating keys when the upstream
  * reports that the current key is unusable.
+ *
+ * Two selection paths exist. A request that mentions a resource id the proxy
+ * has already seen is pinned to the key that created that resource, because the
+ * upstream keeps the resource on that account. Everything else rotates.
  */
 export async function forwardMCP(
   request: Request,
@@ -241,22 +310,64 @@ export async function forwardMCP(
   // The body must be replayable. MCP requests are small JSON documents, so
   // buffering is cheaper and safer than trying to tee a stream.
   const body = request.method === "GET" || request.method === "DELETE" ? null : await request.arrayBuffer();
+  const info = readRequestInfo(body);
+  const affinity = service.affinity;
+
+  // Resolve a binding before anything is sent. Only ids the proxy minted itself
+  // can match, so a search query that happens to look like an id is ignored.
+  let pinnedKeyId: string | null = null;
+  if (affinity && pool.lookupAffinity) {
+    const candidates = collectCandidateIds(info.args);
+    if (candidates.length > 0) pinnedKeyId = await pool.lookupAffinity(candidates);
+  }
+
   const verdicts: ClassifyResult[] = [];
   let lastResponse: Response | null = null;
   let lastKeyId: string | null = null;
   let attempts = 0;
 
-  const maxAttempts = request.method === "GET" || request.method === "DELETE" ? 1 : MAX_ATTEMPTS;
+  // A pinned request gets exactly one attempt: another key would not know the
+  // resource, so retrying would only turn a clear failure into a 404.
+  const maxAttempts = pinnedKeyId
+    ? 1
+    : request.method === "GET" || request.method === "DELETE"
+      ? 1
+      : MAX_ATTEMPTS;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const picked = await pool.pick();
+    let picked: SelectResult | null = null;
+
+    if (pinnedKeyId) {
+      const resolved = pool.pickPinned
+        ? await pool.pickPinned(pinnedKeyId)
+        : { ok: false as const, reason: "missing" as const, status: "missing", cooldownUntil: 0 };
+      if (!resolved.ok) {
+        const message =
+          resolved.reason === "missing"
+            ? "The key that created this resource is no longer in the pool. The resource cannot be reached; start a new task."
+            : resolved.status === "cooling"
+              ? "The key that created this resource is rate limited right now. Retry when the cooldown ends; the resource is still there."
+              : `The key that created this resource is ${resolved.status}. The resource cannot be reached; start a new task.`;
+        return {
+          response: affinityError(info.jsonrpcId, message, resolved.reason === "missing" ? "missing" : resolved.status),
+          keyId: pinnedKeyId,
+          attempts,
+          verdicts,
+          pinned: true,
+        };
+      }
+      picked = resolved.key;
+    } else {
+      picked = await pool.pick();
+    }
+
     if (!picked) {
       if (lastResponse) break;
       return {
         response: new Response(
           JSON.stringify({
             jsonrpc: "2.0",
-            id: null,
+            id: info.jsonrpcId,
             error: { code: -32603, message: "No available API key for this service." },
           }),
           { status: 503, headers: { "content-type": "application/json" } }
@@ -295,7 +406,7 @@ export async function forwardMCP(
         response: new Response(
           JSON.stringify({
             jsonrpc: "2.0",
-            id: null,
+            id: info.jsonrpcId,
             error: { code: -32603, message: `Upstream unreachable: ${message}` },
           }),
           { status: 502, headers: { "content-type": "application/json" } }
@@ -303,6 +414,7 @@ export async function forwardMCP(
         keyId: picked.keyId,
         attempts,
         verdicts,
+        pinned: pinnedKeyId !== null,
       };
     }
 
@@ -324,8 +436,8 @@ export async function forwardMCP(
         status: upstream.status,
         headers: responseHeaders(upstream),
       });
-      if (shouldReplay(verdict, service.retryOn5xx)) continue;
-      return { response: lastResponse, keyId: picked.keyId, attempts, verdicts };
+      if (!pinnedKeyId && shouldReplay(verdict, service.retryOn5xx)) continue;
+      return { response: lastResponse, keyId: picked.keyId, attempts, verdicts, pinned: pinnedKeyId !== null };
     }
 
     // GET and DELETE carry no JSON-RPC result to judge.
@@ -334,13 +446,13 @@ export async function forwardMCP(
         status: upstream.status,
         headers: responseHeaders(upstream),
       });
-      return { response: lastResponse, keyId: picked.keyId, attempts, verdicts };
+      return { response: lastResponse, keyId: picked.keyId, attempts, verdicts, pinned: pinnedKeyId !== null };
     }
 
     const { peek, reader } = await peekFirstEvent(upstream.body, contentType);
     const verdict = judgePeek(service, contentType, peek.text);
 
-    if (verdict && shouldReplay(verdict, service.retryOn5xx)) {
+    if (verdict && !pinnedKeyId && shouldReplay(verdict, service.retryOn5xx)) {
       verdicts.push(verdict);
       await pool.report(picked.keyId, verdict, service.quota);
       await reader.cancel().catch(() => undefined);
@@ -352,8 +464,9 @@ export async function forwardMCP(
     }
 
     if (verdict) {
-      // A real but non-retryable failure (client error). Record it so the admin
-      // panel can show what happened, but hand it straight to the client.
+      // A real but non-retryable failure (client error), or any failure on a
+      // pinned key. Record it so the panel shows what happened, then hand it to
+      // the client unchanged.
       verdicts.push(verdict);
       await pool.report(picked.keyId, verdict, service.quota);
     } else {
@@ -362,6 +475,20 @@ export async function forwardMCP(
         { verdict: "ok", message: "", requestNotProcessed: false },
         service.quota
       );
+
+      // Successful result: remember any resource ids it minted, so follow-up
+      // calls land on this same key.
+      if (affinity?.responseFields.length && pool.recordAffinity) {
+        const minted: string[] = [];
+        for (const payload of payloadsOf(contentType, peek.text)) {
+          minted.push(...collectResultIds(payload, affinity.responseFields));
+        }
+        if (minted.length > 0) {
+          // A failed bookkeeping write must not fail a request the upstream
+          // already served and charged for.
+          await pool.recordAffinity(minted, picked.keyId, affinity.ttlSecs).catch(() => 0);
+        }
+      }
     }
 
     const stream = replayThenStream(peek.buffered, reader);
@@ -374,6 +501,7 @@ export async function forwardMCP(
       keyId: picked.keyId,
       attempts,
       verdicts,
+      pinned: pinnedKeyId !== null,
     };
   }
 
@@ -383,7 +511,7 @@ export async function forwardMCP(
       new Response(
         JSON.stringify({
           jsonrpc: "2.0",
-          id: null,
+          id: info.jsonrpcId,
           error: { code: -32603, message: "All upstream key attempts failed." },
         }),
         { status: 502, headers: { "content-type": "application/json" } }
@@ -391,5 +519,6 @@ export async function forwardMCP(
     keyId: lastKeyId,
     attempts,
     verdicts,
+    pinned: pinnedKeyId !== null,
   };
 }

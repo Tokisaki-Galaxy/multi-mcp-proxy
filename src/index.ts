@@ -9,8 +9,9 @@ import {
 } from "./registry";
 import { renderAdmin } from "./admin-ui";
 import { parseKeyInput } from "./key-input";
-import { negotiate, t, isLocale, type LocaleCode, type MessageKey } from "./i18n";import { explicitLocale, langCookie, readCookie, LANG_COOKIE, LANG_QUERY } from "./i18n/locale";
-import type { ServiceConfig, QuotaRules, AuthStyle, UsageProbe } from "./types";
+import { negotiate, t, isLocale, type LocaleCode, type MessageKey } from "./i18n";
+import { explicitLocale, langCookie, readCookie, LANG_COOKIE, LANG_QUERY } from "./i18n/locale";
+import type { ServiceConfig, QuotaRules, AuthStyle, UsageProbe, AffinityRules } from "./types";
 import type { KeyPool } from "./pool";
 
 export { KeyPool } from "./pool";
@@ -137,8 +138,12 @@ app.get("/api/services", async (c) => {
   const services = await listServices(c.env.REGISTRY);
   const enriched = await Promise.all(
     services.map(async (s) => {
-      const stats = await poolFor(c.env, s.id).stats();
-      return { ...s, stats };
+      const pool = poolFor(c.env, s.id);
+      const stats = await pool.stats();
+      // Bindings are only meaningful for services that opted in; skip the query
+      // otherwise so a stateless service pays nothing.
+      const affinityStats = s.affinity ? await pool.affinityStats().catch(() => ({ live: 0, expired: 0 })) : null;
+      return { ...s, stats, affinityStats };
     })
   );
   return c.json({ services: enriched });
@@ -208,6 +213,23 @@ app.post("/api/services", async (c) => {
     usage = { url: usageUrl, style, usedPath, limitPath, limitFallbackPath, remainingPath };
   }
 
+  // Resource affinity is optional. When enabled it must name at least one field
+  // to read, otherwise nothing would ever be bound and the setting would be a
+  // silent no-op.
+  let affinity: AffinityRules | undefined;
+  if (body.affinity && typeof body.affinity === "object") {
+    const raw = body.affinity as Partial<AffinityRules>;
+    const fields = Array.isArray(raw.responseFields)
+      ? raw.responseFields.map((f) => String(f).trim()).filter((f) => f.length > 0).slice(0, 16)
+      : [];
+    if (fields.length === 0) {
+      return fail(c, 400, "api.affinityFieldsRequired");
+    }
+    const ttlRaw = Number(raw.ttlSecs);
+    const ttlSecs = Number.isFinite(ttlRaw) && ttlRaw > 0 ? Math.min(Math.trunc(ttlRaw), 30 * 86_400) : 86_400;
+    affinity = { responseFields: fields, ttlSecs };
+  }
+
   const service: ServiceConfig = {
     id,
     name: String(body.name ?? id),
@@ -216,6 +238,7 @@ app.post("/api/services", async (c) => {
     auth,
     quota,
     usage,
+    affinity,
     retryOn5xx: body.retryOn5xx === true,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,

@@ -586,3 +586,158 @@ test("deletes a service", async () => {
   const list = (await (await api("/api/services")).json()) as any;
   assert.equal(list.services.some((s: any) => s.id === "off"), false);
 });
+
+/* ------------------------------------------------------------ affinity */
+
+const AFFINITY_KEY = "01a1c63f-43f4-7738-9b87-51c319dc0394";
+
+/** Call a tool through the proxy and report which key served it. */
+async function callTool(serviceId: string, name: string, args: unknown) {
+  const res = await fetch(`${base}/${serviceId}/mcp`, {
+    method: "POST",
+    headers: {
+      "x-proxy-key": PROXY_KEY,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+  });
+  const text = await res.text();
+  return { status: res.status, keyId: res.headers.get("x-proxy-key-id"), attempts: res.headers.get("x-proxy-attempts"), text };
+}
+
+test("pins a follow-up call to the key that minted the resource", async () => {
+  const save = await api("/api/services", {
+    id: "aff",
+    name: "Affinity",
+    upstreamUrl,
+    auth: { type: "header", name: "x-api-key" },
+    affinity: { responseFields: ["id"], ttlSecs: 3600 },
+  });
+  assert.equal(save.status, 200);
+
+  await api("/api/services/aff/keys", { keys: "aff-key-one-1\naff-key-two-2" });
+
+  // A creating call returns a job id inside the text block. Flip the reply after
+  // the first call so later calls answer as ordinary tools would; otherwise the
+  // unrelated search below would re-bind the same id to a different key.
+  let mintNext = true;
+  script = () => {
+    if (mintNext) {
+      mintNext = false;
+      return sse({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { content: [{ type: "text", text: JSON.stringify({ id: AFFINITY_KEY, status: "scraping" }) }] },
+      });
+    }
+    return sse({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "ordinary result" }] } });
+  };
+
+  const create = await callTool("aff", "crawl", { url: "https://example.com" });
+  assert.ok(create.keyId, "no key reported on the creating call");
+  const ownerKey = create.keyId;
+
+  // Now push the pool toward the other key by making the owner look busy. Two
+  // free calls are enough: ranking compares (uses+1)/weight.
+  const other = (await (await api("/api/services/aff/keys")).json()) as any;
+  const otherKey = other.keys.find((k: any) => k.id !== ownerKey).id;
+
+  // A request that does not mention the id should go to the other key.
+  const plain = await callTool("aff", "search", { query: "something unrelated" });
+  assert.notEqual(plain.keyId, ownerKey, "stateless traffic should have moved off the owner key");
+
+  // A request mentioning the id must go back to the owner.
+  const followUp = await callTool("aff", "check_crawl_status", { id: AFFINITY_KEY });
+  assert.equal(followUp.keyId, ownerKey, "a follow-up referencing the id must stay on its key");
+  assert.equal(followUp.attempts, "1", "a pinned request should never rotate");
+
+  // The panel reports the live binding count.
+  const list = (await (await api("/api/services")).json()) as any;
+  const svc = list.services.find((s: any) => s.id === "aff");
+  assert.ok(svc.affinityStats.live >= 1, "binding not counted");
+
+  await api("/api/services/aff", undefined, "DELETE");
+});
+
+test("an unusable pinned key yields an explicit error instead of a 404", async () => {
+  await api("/api/services", {
+    id: "aff2",
+    name: "Affinity 2",
+    upstreamUrl,
+    auth: { type: "header", name: "x-api-key" },
+    affinity: { responseFields: ["id"], ttlSecs: 3600 },
+  });
+  await api("/api/services/aff2/keys", { keys: "aff2-key-one\naff2-key-two" });
+
+  script = () =>
+    sse({
+      jsonrpc: "2.0",
+      id: 1,
+      result: { content: [{ type: "text", text: JSON.stringify({ id: AFFINITY_KEY }) }] },
+    });
+  const create = await callTool("aff2", "crawl", { url: "https://example.com" });
+  const ownerKey = create.keyId!;
+
+  // Make the script stop minting so the only binding is the one above.
+  script = () => sse({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "ok" }] } });
+
+  // Kill the owner so the binding cannot be served.
+  const res = await fetch(`${base}/api/services/aff2/keys/${ownerKey}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", "x-proxy-key": PROXY_KEY },
+    body: JSON.stringify({ status: "invalid" }),
+  });
+  assert.equal(res.status, 200);
+
+  const followUp = await callTool("aff2", "check_crawl_status", { id: AFFINITY_KEY });
+  assert.equal(followUp.status, 200, "the error should be a JSON-RPC error, not an HTTP one");
+  // The proxy answers with plain application/json here, not an SSE stream.
+  const payload = JSON.parse(followUp.text);
+  assert.equal(payload.error.code, -32001);
+  assert.match(payload.error.message, /invalid|cannot be reached/i);
+  assert.equal(payload.error.data.reason, "invalid");
+  // No upstream attempt was made at all: the binding could not be served, and
+  // trying another key would have produced a misleading 404.
+  assert.equal(followUp.attempts, "0");
+
+  await api("/api/services/aff2", undefined, "DELETE");
+});
+
+test("a service without affinity never pins", async () => {
+  const save = await api("/api/services", {
+    id: "noaff",
+    name: "No affinity",
+    upstreamUrl,
+    auth: { type: "header", name: "x-api-key" },
+  });
+  assert.equal(save.status, 200);
+  await api("/api/services/noaff/keys", { keys: "noaff-key-one\nnoaff-key-two" });
+
+  script = () =>
+    sse({
+      jsonrpc: "2.0",
+      id: 1,
+      result: { content: [{ type: "text", text: JSON.stringify({ id: AFFINITY_KEY }) }] },
+    });
+  await callTool("noaff", "crawl", { url: "https://example.com" });
+
+  const followUp = await callTool("noaff", "check_crawl_status", { id: AFFINITY_KEY });
+  // With two keys and rotation, the second call lands on the other key. Nothing
+  // is pinned because the service opted out.
+  const list = (await (await api("/api/services")).json()) as any;
+  const svc = list.services.find((s: any) => s.id === "noaff");
+  assert.equal(svc.affinityStats, null);
+  assert.ok(followUp.keyId);
+
+  await api("/api/services/noaff", undefined, "DELETE");
+});
+
+test("rejects affinity with no fields", async () => {
+  const res = await api("/api/services", {
+    id: "badaff",
+    upstreamUrl,
+    affinity: { responseFields: [], ttlSecs: 60 },
+  });
+  assert.equal(res.status, 400);
+});
