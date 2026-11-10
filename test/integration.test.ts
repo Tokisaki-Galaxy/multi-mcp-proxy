@@ -216,6 +216,70 @@ test("rejects a duplicated note inside one batch", async () => {
   assert.match(body.error, /重复/);
 });
 
+test("usage sync reads real numbers through a configured probe", async () => {
+  // A second local endpoint stands in for the provider's balance API.
+  const { createServer } = await import("node:http");
+  const balance = createServer((req, res) => {
+    const key = req.headers["x-api-key"] as string;
+    res.writeHead(200, { "content-type": "application/json" });
+    // Mimic Firecrawl: plan credits plus what is left.
+    res.end(JSON.stringify({ success: true, data: { planCredits: 1000, remainingCredits: key === "key-aaaa-1111" ? 600 : 250 } }));
+  });
+  await new Promise<void>((r) => balance.listen(0, "127.0.0.1", r));
+  const balanceUrl = `http://127.0.0.1:${(balance.address() as any).port}/credit-usage`;
+
+  try {
+    const save = await api("/api/services", {
+      id: "metered",
+      name: "Metered",
+      upstreamUrl,
+      auth: { type: "header", name: "x-api-key" },
+      usage: {
+        url: balanceUrl,
+        style: { type: "header", name: "x-api-key" },
+        remainingPath: "data.remainingCredits",
+        limitPath: "data.planCredits",
+      },
+    });
+    assert.equal(save.status, 200);
+
+    await api("/api/services/metered/keys", { keys: "key-aaaa-1111\nkey-bbbb-2222" });
+
+    const synced = await api("/api/services/metered/keys/sync", {});
+    const body = (await synced.json()) as any;
+    assert.equal(synced.status, 200);
+    assert.equal(body.synced, 2);
+    assert.equal(body.failed, 0);
+
+    const listed = (await (await api("/api/services/metered/keys")).json()) as any;
+    const first = listed.keys.find((k: any) => k.mask.includes("1111"));
+    assert.equal(first.quotaLimit, 1000);
+    // remaining 600 of 1000 means 400 used.
+    assert.equal(first.quotaUsed, 400);
+    assert.ok(first.quotaSyncedAt > 0);
+
+    await api("/api/services/metered", undefined, "DELETE");
+  } finally {
+    await new Promise<void>((r) => balance.close(() => r()));
+  }
+});
+
+test("usage sync explains itself when no probe is configured", async () => {
+  const res = await api("/api/services/svc/keys/sync", {});
+  assert.equal(res.status, 400);
+  const body = (await res.json()) as any;
+  assert.match(body.error, /余额查询接口/);
+});
+
+test("rejects a usage probe without a readable path", async () => {
+  const res = await api("/api/services", {
+    id: "badprobe",
+    upstreamUrl,
+    usage: { url: "https://api.example.com/usage", style: { type: "header", name: "x-api-key" } },
+  });
+  assert.equal(res.status, 400);
+});
+
 test("deduplicates the same key pasted twice", async () => {
   const res = await api("/api/services/svc/keys", { keys: "key-aaaa-1111" });
   const data = (await res.json()) as any;

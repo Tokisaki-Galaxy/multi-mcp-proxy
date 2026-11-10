@@ -130,6 +130,37 @@ app.post("/api/services", async (c) => {
 
   const quota: QuotaRules = { ...DEFAULT_QUOTA, ...(body.quota ?? {}) };
 
+  // A usage probe is optional, but when present it must point somewhere https
+  // and carry at least one readable path, otherwise "sync balance" silently
+  // does nothing useful.
+  let usage: UsageProbe | undefined;
+  if (body.usage && typeof body.usage === "object") {
+    const raw = body.usage as UsageProbe;
+    const usageUrl = String(raw.url ?? "").trim();
+    const probeHttps = /^https:\/\/[^\s]+$/.test(usageUrl);
+    const probeLoopback = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/.test(usageUrl);
+    if (!probeHttps && !probeLoopback) {
+      return c.json({ error: "usage.url must be an https URL" }, 400);
+    }
+    const style: AuthStyle = raw.style && typeof raw.style === "object" ? raw.style : auth;
+    if (style.type !== "header" && style.type !== "query") {
+      return c.json({ error: "usage.style.type must be 'header' or 'query'" }, 400);
+    }
+    if (!style.name) return c.json({ error: "usage.style.name is required" }, 400);
+
+    const usedPath = raw.usedPath ? String(raw.usedPath).trim() : undefined;
+    const limitPath = raw.limitPath ? String(raw.limitPath).trim() : undefined;
+    const remainingPath = raw.remainingPath ? String(raw.remainingPath).trim() : undefined;
+    if (!usedPath && !remainingPath) {
+      return c.json(
+        { error: "usage needs usedPath or remainingPath so the balance can be read" },
+        400
+      );
+    }
+
+    usage = { url: usageUrl, style, usedPath, limitPath, remainingPath };
+  }
+
   const service: ServiceConfig = {
     id,
     name: String(body.name ?? id),
@@ -137,7 +168,7 @@ app.post("/api/services", async (c) => {
     upstreamUrl,
     auth,
     quota,
-    usage: (body.usage as UsageProbe | undefined) ?? undefined,
+    usage,
     retryOn5xx: body.retryOn5xx === true,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
@@ -215,7 +246,16 @@ app.post("/api/services/:id/keys/sync", async (c) => {
   const id = c.req.param("id");
   const service = await getService(c.env.REGISTRY, id);
   if (!service) return c.json({ error: "Service not found" }, 404);
-  if (!service.usage) return c.json({ error: "This service has no usage probe configured" }, 400);
+  if (!service.usage) {
+    return c.json(
+      {
+        error: `服务 ${id} 没有配置余额查询接口，无法同步。` +
+          `在上方「余额查询接口」里填写该服务的官方额度端点即可。` +
+          `注意 Exa 的普通 API key 没有官方余额接口，只能开通 Team Management 后才有。`,
+      },
+      400
+    );
+  }
   const result = await poolFor(c.env, id).syncUsage(service.usage);
   return c.json(result);
 });
