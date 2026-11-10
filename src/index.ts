@@ -318,25 +318,6 @@ app.all("/:service/mcp", async (c) => {
   if (!service.enabled) return c.json({ error: `Service '${serviceId}' is disabled` }, 503);
 
   const pool = poolFor(c.env, serviceId);
-
-  // TEMP-SESSION-PROBE: log what the caller sent so we can tell whether the
-  // portal reuses one upstream session or opens a fresh one per tool call.
-  {
-    const sid = c.req.header("mcp-session-id") ?? "";
-    const method = c.req.method;
-    let jrpc = "";
-    try {
-      const clone = c.req.raw.clone();
-      const body = await clone.json<any>();
-      jrpc = body?.method ?? "";
-    } catch {
-      /* GET or non-JSON body */
-    }
-    console.log(
-      `SESSIONPROBE svc=${serviceId} http=${method} rpc=${jrpc || "-"} sid=${sid ? sid.slice(0, 16) : "NONE"}`
-    );
-  }
-
   const outcome = await forwardMCP(c.req.raw, service, pool);
 
   const headers = new Headers(outcome.response.headers);
