@@ -53,6 +53,18 @@ export const de: Catalog = {
   "svc.savedWithUsage": "Gespeichert, mit Kontingent-Endpunkt",
   "svc.savedWithoutUsage": "Gespeichert, ohne Kontingent-Endpunkt",
 
+  // -------------------------------------------------------- Ressourcenbindung
+  "affinity.title": "Ressourcenbindung (optional)",
+  "affinity.hint":
+    "Der Upstream bindet Job- oder Sitzungs-IDs an das Konto, das sie erzeugt hat. Ohne diese Option verschwinden diese Jobs, sobald auf einen anderen Schlüssel gewechselt wird.",
+  "affinity.field.fields": "Felder für Ressourcen-IDs",
+  "affinity.field.fieldsHint": "id, scrapeId, uploadRef",
+  "affinity.field.ttl": "Bindungsdauer in Sekunden",
+  "affinity.presetNote.firecrawl":
+    "Firecrawl bindet Crawl-, Agent-, Browser- und Parse-Jobs an das erzeugende Konto, daher ist das hier standardmäßig an.",
+  "affinity.off": "aus",
+  "affinity.on": "gebunden {n}",
+
   // -------------------------------------------------------------- usage api
   "usage.title": "Kontingent-Endpunkt (optional)",
   "usage.expand": "Ausklappen",
@@ -141,4 +153,6 @@ export const de: Catalog = {
   "api.internal": "Interner Proxy-Fehler",
   "api.noUsageProbe":
     "Für Dienst {id} ist kein Kontingent-Endpunkt konfiguriert, Kontingente lassen sich daher nicht abgleichen. Oben den Kontingent-Endpunkt ausfüllen. Normale Exa-API-Schlüssel haben keine Kontingent-API, dafür ist Team Management nötig.",
+  "api.affinityFieldsRequired":
+    "Ressourcenbindung ist aktiv, aber es sind keine ID-Felder angegeben. Mindestens ein Feld nennen oder die Bindung abschalten.",
 };

@@ -48,6 +48,18 @@ export const fr: Catalog = {
   "svc.savedWithUsage": "Enregistré, avec un point de terminaison de solde",
   "svc.savedWithoutUsage": "Enregistré, sans point de terminaison de solde",
 
+  // ----------------------------------------------------- affinité de ressource
+  "affinity.title": "Affinité de ressource (facultatif)",
+  "affinity.hint":
+    "L'amont rattache les identifiants de tâche ou de session au compte qui les a créés. Sans cette option, ces tâches disparaissent dès qu'on change de clé.",
+  "affinity.field.fields": "Champs d'identifiant de ressource",
+  "affinity.field.fieldsHint": "id, scrapeId, uploadRef",
+  "affinity.field.ttl": "Durée de liaison en secondes",
+  "affinity.presetNote.firecrawl":
+    "Firecrawl rattache les tâches d'exploration, d'agent, de navigateur et d'analyse au compte créateur, donc cette option est active par défaut.",
+  "affinity.off": "inactif",
+  "affinity.on": "liées {n}",
+
   "usage.title": "Point de terminaison de solde (facultatif)",
   "usage.expand": "Développer",
   "usage.collapse": "Réduire",
@@ -130,4 +142,6 @@ export const fr: Catalog = {
   "api.internal": "Erreur interne du proxy",
   "api.noUsageProbe":
     "Le service {id} n'a pas de point de terminaison de solde configuré, les soldes ne peuvent donc pas être synchronisés. Renseignez le point de terminaison de solde ci-dessus. Les clés API Exa ordinaires n'ont pas d'API de solde, il faut Team Management.",
+  "api.affinityFieldsRequired":
+    "L'affinité de ressource est active mais aucun champ d'identifiant n'est indiqué. Nommez au moins un champ, ou désactivez l'affinité.",
 };

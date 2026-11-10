@@ -48,6 +48,18 @@ export const zh: Catalog = {
   "svc.savedWithUsage": "已保存，带余额接口",
   "svc.savedWithoutUsage": "已保存，无余额接口",
 
+  // --------------------------------------------------------- 资源亲和
+  "affinity.title": "资源亲和（可选）",
+  "affinity.hint":
+    "上游会把任务 id 或会话 id 绑在创建它的账号上。不开这个，换 key 之后那些任务就找不到了。只对需要跨多次调用延续状态的服务开。",
+  "affinity.field.fields": "资源 id 字段",
+  "affinity.field.fieldsHint": "id, scrapeId, uploadRef",
+  "affinity.field.ttl": "绑定保留时长（秒）",
+  "affinity.presetNote.firecrawl":
+    "Firecrawl 的爬取、智能体、云浏览器和文档解析任务都绑在创建它的账号上，所以这里默认开启。",
+  "affinity.off": "未开启",
+  "affinity.on": "已绑定 {n}",
+
   "usage.title": "余额查询接口（可选）",
   "usage.expand": "展开",
   "usage.collapse": "收起",
@@ -126,4 +138,6 @@ export const zh: Catalog = {
   "api.internal": "代理内部错误",
   "api.noUsageProbe":
     "服务 {id} 没有配置余额查询接口，无法同步。请在上方余额查询接口里填写该服务的官方额度端点。Exa 的普通 API key 没有官方余额接口，需要开通 Team Management 才有。",
+  "api.affinityFieldsRequired":
+    "开启了资源亲和但没有填任何 id 字段。至少填一个字段名，或者干脆关掉亲和。",
 };

@@ -60,6 +60,18 @@ export const en = {
   "svc.savedWithUsage": "Saved, with a balance endpoint",
   "svc.savedWithoutUsage": "Saved, no balance endpoint",
 
+  // --------------------------------------------------------- resource affinity
+  "affinity.title": "Resource affinity (optional)",
+  "affinity.hint":
+    "Turn this on for services that hand out a job id or session id and keep it on the account that created it. Without it, rotating to another key makes those jobs disappear.",
+  "affinity.field.fields": "Resource id fields",
+  "affinity.field.fieldsHint": "id, scrapeId, uploadRef",
+  "affinity.field.ttl": "Binding lifetime (seconds)",
+  "affinity.presetNote.firecrawl":
+    "Firecrawl keeps crawl, agent, browser and parse jobs on the account that created them, so this is on by default.",
+  "affinity.off": "off",
+  "affinity.on": "pinned {n}",
+
   // -------------------------------------------------------------- usage api
   "usage.title": "Balance endpoint (optional)",
   "usage.expand": "Expand",
@@ -146,6 +158,8 @@ export const en = {
   "api.internal": "Internal proxy error",
   "api.noUsageProbe":
     "Service {id} has no balance endpoint configured, so balances cannot be synced. Fill in the balance endpoint above. Regular Exa API keys have no balance API; it requires Team Management.",
+  "api.affinityFieldsRequired":
+    "Resource affinity is on but no id fields are listed. Name at least one field, or leave affinity off entirely.",
 };
 
 export type MessageKey = keyof typeof en;

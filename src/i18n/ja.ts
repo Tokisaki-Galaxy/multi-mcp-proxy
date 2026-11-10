@@ -49,6 +49,18 @@ export const ja: Catalog = {
   "svc.savedWithUsage": "保存しました。残高エンドポイントあり",
   "svc.savedWithoutUsage": "保存しました。残高エンドポイントなし",
 
+  // --------------------------------------------------------- リソース親和
+  "affinity.title": "リソース親和 任意",
+  "affinity.hint":
+    "上流はジョブ ID やセッション ID を作成したアカウントに紐づけます。これを有効にしないと、キーを切り替えた時点でそれらのジョブは見つからなくなります。",
+  "affinity.field.fields": "リソース ID フィールド",
+  "affinity.field.fieldsHint": "id, scrapeId, uploadRef",
+  "affinity.field.ttl": "紐づけの保持秒数",
+  "affinity.presetNote.firecrawl":
+    "Firecrawl のクロール、エージェント、ブラウザ、解析ジョブは作成したアカウントに紐づくため、既定で有効です。",
+  "affinity.off": "無効",
+  "affinity.on": "紐づけ {n}",
+
   "usage.title": "残高エンドポイント 省略可",
   "usage.expand": "展開",
   "usage.collapse": "折りたたむ",
@@ -130,4 +142,6 @@ export const ja: Catalog = {
   "api.internal": "プロキシ内部エラー",
   "api.noUsageProbe":
     "サービス {id} には残高エンドポイントが設定されていないため、残高を同期できません。上で残高エンドポイントを入力してください。通常の Exa API キーには残高 API がなく、Team Management が必要です。",
+  "api.affinityFieldsRequired":
+    "リソース親和が有効ですが ID フィールドが空です。少なくとも 1 つ指定するか、親和を無効にしてください。",
 };

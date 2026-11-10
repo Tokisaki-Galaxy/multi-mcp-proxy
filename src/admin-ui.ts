@@ -243,6 +243,18 @@ export function renderAdmin(locale: LocaleCode): string {
           </div>
           <div class="hint">${s("usage.hint.paths")}</div>
         </div>
+        <div class="divider"></div>
+        <div class="row">
+          <div class="svc-title" style="flex:1">${s("affinity.title")}</div>
+          <button type="button" class="ghost sm" onclick="toggleAffinityFields()" id="affinityToggleBtn">${s("usage.expand")}</button>
+        </div>
+        <div class="hint">${s("affinity.hint")}</div>
+        <div id="affinityFields" class="hidden">
+          <div class="row" style="margin-top:10px">
+            <label class="field" style="flex:2"><span>${s("affinity.field.fields")}</span><input id="f-affinityFields" placeholder="${s("affinity.field.fieldsHint")}" /></label>
+            <label class="field"><span>${s("affinity.field.ttl")}</span><input id="f-affinityTtl" placeholder="86400" value="86400" /></label>
+          </div>
+        </div>
         <div class="toolbar">
           <button type="submit">${s("svc.save")}</button>
         </div>
@@ -437,6 +449,10 @@ const PRESETS = {
       authName: "Authorization", authPrefix: "Bearer ",
       used: "", limit: "data.planCredits", limitFallback: "", remaining: "data.remainingCredits",
     },
+    affinity: {
+      responseFields: ["id", "scrapeId", "uploadRef"],
+      ttlSecs: 86400,
+    },
   },
   exa: {
     id: "exa", name: "Exa",
@@ -449,6 +465,7 @@ const PRESETS = {
 
 /** Exa has no per-key balance endpoint on regular keys, only Team Management. */
 const USAGE_PRESET_NOTE = { exa: tr("usage.presetNote.exa") };
+const AFFINITY_PRESET_NOTE = { firecrawl: tr("affinity.presetNote.firecrawl") };
 
 function toggleUsageFields() {
   const box = $("usageFields");
@@ -456,6 +473,20 @@ function toggleUsageFields() {
   const open = box.classList.contains("hidden");
   box.classList.toggle("hidden", !open);
   btn.textContent = open ? tr("usage.collapse") : tr("usage.expand");
+}
+
+function toggleAffinityFields() {
+  const box = $("affinityFields");
+  const btn = $("affinityToggleBtn");
+  const open = box.classList.contains("hidden");
+  box.classList.toggle("hidden", !open);
+  btn.textContent = open ? tr("usage.collapse") : tr("usage.expand");
+}
+
+function fillAffinity(a) {
+  $("f-affinityFields").value = a ? a.responseFields.join(", ") : "";
+  $("f-affinityTtl").value = a ? a.ttlSecs : 86400;
+  if (a && $("affinityFields").classList.contains("hidden")) toggleAffinityFields();
 }
 
 function fillUsage(u) {
@@ -481,6 +512,7 @@ function applyPreset() {
     $("f-cooldown").value = "429";
     $("f-invalid").value = "401";
     fillUsage(null);
+    fillAffinity(null);
     setMsg("svcMsg", "", false);
     return;
   }
@@ -495,7 +527,8 @@ function applyPreset() {
   $("f-cooldown").value = p.cooldown;
   $("f-invalid").value = p.invalid;
   fillUsage(p.usage);
-  setMsg("svcMsg", USAGE_PRESET_NOTE[key] || "", false);
+  fillAffinity(p.affinity);
+  setMsg("svcMsg", AFFINITY_PRESET_NOTE[key] || USAGE_PRESET_NOTE[key] || "", false);
 }
 
 function nums(str, fallback) {
@@ -520,6 +553,14 @@ async function addService() {
       }
     : undefined;
 
+  const affinityFields = $("f-affinityFields").value.trim();
+  const affinity = affinityFields
+    ? {
+        responseFields: affinityFields.split(/[,\s]+/).map((v) => v.trim()).filter(Boolean),
+        ttlSecs: nums($("f-affinityTtl").value, [86400])[0] || 86400,
+      }
+    : undefined;
+
   const body = {
     id: $("f-id").value.trim().toLowerCase(),
     name: $("f-name").value.trim(),
@@ -537,6 +578,7 @@ async function addService() {
       resetDay: 1,
     },
     usage,
+    affinity,
   };
   try {
     await api("/api/services", { method: "POST", body: JSON.stringify(body) });
@@ -606,6 +648,10 @@ async function loadServices() {
     list.className = "";
     list.innerHTML = data.services.map((s) => {
       const st = s.stats || { total: 0, active: 0, cooling: 0, exhausted: 0, invalid: 0 };
+      const af = s.affinityStats || { live: 0 };
+      const pinBadge = s.affinity
+        ? '<span class="badge active">' + esc(tr("affinity.on", { n: af.live })) + "</span>"
+        : '<span class="muted">' + esc(tr("affinity.off")) + "</span>";
       return '<div class="card" style="background:var(--panel-2);margin-bottom:12px">' +
         '<div class="svc-head">' +
           "<div>" +
@@ -620,6 +666,7 @@ async function loadServices() {
           "<span>" + esc(tr("svc.stats.cooling")) + " <b>" + st.cooling + "</b></span>" +
           "<span>" + esc(tr("svc.stats.exhausted")) + " <b>" + st.exhausted + "</b></span>" +
           "<span>" + esc(tr("svc.stats.invalid")) + " <b>" + st.invalid + "</b></span>" +
+          "<span>" + pinBadge + "</span>" +
         "</div>" +
         '<div class="divider"></div>' +
         '<div class="keys" id="keys-' + esc(s.id) + '"><div class="empty">' + esc(tr("state.loading")) + "</div></div>" +
