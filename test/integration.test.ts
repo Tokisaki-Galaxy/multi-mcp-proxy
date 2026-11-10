@@ -280,6 +280,30 @@ test("rejects a usage probe without a readable path", async () => {
   assert.equal(res.status, 400);
 });
 
+test("keeps the limit fallback path when saving a service", async () => {
+  // Regression: the fallback was accepted by the type but dropped on save, so
+  // Tavily's null key.limit could never resolve to account.plan_limit.
+  const save = await api("/api/services", {
+    id: "fallback",
+    name: "Fallback",
+    upstreamUrl,
+    usage: {
+      url: "https://api.tavily.com/usage",
+      style: { type: "header", name: "Authorization", prefix: "Bearer " },
+      usedPath: "key.usage",
+      limitPath: "key.limit",
+      limitFallbackPath: "account.plan_limit",
+    },
+  });
+  assert.equal(save.status, 200);
+
+  const listed = (await (await api("/api/services")).json()) as any;
+  const svc = listed.services.find((s: any) => s.id === "fallback");
+  assert.equal(svc.usage.limitFallbackPath, "account.plan_limit");
+
+  await api("/api/services/fallback", undefined, "DELETE");
+});
+
 test("deduplicates the same key pasted twice", async () => {
   const res = await api("/api/services/svc/keys", { keys: "key-aaaa-1111" });
   const data = (await res.json()) as any;

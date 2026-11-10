@@ -150,6 +150,7 @@ app.post("/api/services", async (c) => {
 
     const usedPath = raw.usedPath ? String(raw.usedPath).trim() : undefined;
     const limitPath = raw.limitPath ? String(raw.limitPath).trim() : undefined;
+    const limitFallbackPath = raw.limitFallbackPath ? String(raw.limitFallbackPath).trim() : undefined;
     const remainingPath = raw.remainingPath ? String(raw.remainingPath).trim() : undefined;
     if (!usedPath && !remainingPath) {
       return c.json(
@@ -158,7 +159,7 @@ app.post("/api/services", async (c) => {
       );
     }
 
-    usage = { url: usageUrl, style, usedPath, limitPath, remainingPath };
+    usage = { url: usageUrl, style, usedPath, limitPath, limitFallbackPath, remainingPath };
   }
 
   const service: ServiceConfig = {
