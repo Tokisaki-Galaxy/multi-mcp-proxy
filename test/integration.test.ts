@@ -30,6 +30,8 @@ interface Seen {
   apiKey: string | null;
   body: string;
   accept: string | null;
+  /** Every header the upstream saw, lowercased. */
+  headers: Record<string, string>;
 }
 
 interface ScriptedReply {
@@ -80,6 +82,9 @@ before(async () => {
         apiKey: (req.headers["x-api-key"] as string) ?? null,
         body: Buffer.concat(chunks).toString("utf8"),
         accept: (req.headers.accept as string) ?? null,
+        headers: Object.fromEntries(
+          Object.entries(req.headers).map(([k, v]) => [k.toLowerCase(), Array.isArray(v) ? v.join(",") : (v ?? "")])
+        ),
       });
       const reply = script(seen.length - 1);
       res.writeHead(reply.status, reply.headers);
@@ -429,6 +434,51 @@ test("honours a 429 with Retry-After by cooling the key", async () => {
     assert.ok(k.cooldownUntil - now >= 25, `cooldown too short: ${k.cooldownUntil - now}s`);
     assert.ok(k.cooldownUntil - now <= 35, `cooldown too long: ${k.cooldownUntil - now}s`);
   }
+});
+
+test("returns 404 for a legacy SSE transport path", async () => {
+  // The pre-2025-03 HTTP+SSE transport used two endpoints. This proxy only
+  // speaks Streamable HTTP, so those paths must not silently half-work.
+  for (const p of ["/svc/sse", "/svc/message"]) {
+    const res = await fetch(base + p, { headers: { "x-proxy-key": PROXY_KEY } });
+    assert.equal(res.status, 404, `${p} should not be routed`);
+    await res.text();
+  }
+});
+
+test("passes protocol headers through untouched", async () => {
+  // The proxy is transport-level: it forwards the client's declared protocol
+  // version and the 2026 routing headers verbatim, leaving negotiation to the
+  // upstream.
+  //
+  // The 429 test above cooled every key, so add a fresh one for this call.
+  await api("/api/services/svc/keys", { keys: "key-header-probe-1" });
+  script = () => sse({ jsonrpc: "2.0", id: 1, result: {} });
+  seen.length = 0;
+
+  await fetch(base + "/svc/mcp", {
+    method: "POST",
+    headers: {
+      "x-proxy-key": PROXY_KEY,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      "mcp-session-id": "session-abc",
+      "mcp-protocol-version": "2025-11-25",
+      "mcp-method": "tools/list",
+      "mcp-name": "web_search_exa",
+      "last-event-id": "42",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+  });
+
+  const h = seen[0]!.headers;
+  assert.equal(h["mcp-session-id"], "session-abc");
+  assert.equal(h["mcp-protocol-version"], "2025-11-25");
+  assert.equal(h["mcp-method"], "tools/list");
+  assert.equal(h["mcp-name"], "web_search_exa");
+  assert.equal(h["last-event-id"], "42");
+  // The client's own proxy credential must never reach the upstream.
+  assert.equal(h["x-proxy-key"], undefined);
 });
 
 test("returns 404 for an unknown service", async () => {
