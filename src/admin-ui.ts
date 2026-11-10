@@ -112,13 +112,18 @@ const HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>multi-mcp-proxy 控制台</title>
 <script>
-  // Apply the saved theme before first paint so there is no flash.
-  try {
-    var savedTheme = localStorage.getItem("mmp_theme");
-    if (savedTheme === "light" || savedTheme === "dark") {
-      document.documentElement.setAttribute("data-theme", savedTheme);
-    }
-  } catch (e) {}
+  // Resolve the theme before first paint so there is no flash.
+  // Saved value is "auto", "light" or "dark"; missing means auto, which is the
+  // default so the panel matches the operating system out of the box.
+  (function () {
+    var saved = null;
+    try { saved = localStorage.getItem("mmp_theme"); } catch (e) {}
+    var mode = saved === "light" || saved === "dark" || saved === "auto" ? saved : "auto";
+    var prefersLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
+    var resolved = mode === "auto" ? (prefersLight ? "light" : "dark") : mode;
+    document.documentElement.setAttribute("data-theme", resolved);
+    document.documentElement.setAttribute("data-theme-mode", mode);
+  })();
 </script>
 <style>${CSS}</style>
 </head>
@@ -130,7 +135,7 @@ const HTML = `<!doctype html>
       <div class="sub">多服务 MCP 透明反代与密钥池</div>
     </div>
     <div class="row" style="flex:0 0 auto">
-      <button id="themeBtn" class="ghost" onclick="toggleTheme()" title="切换明暗主题">浅色</button>
+      <button id="themeBtn" class="ghost" onclick="toggleTheme()" title="切换主题">跟随系统</button>
       <button id="logoutBtn" class="ghost hidden" onclick="logout()">注销</button>
     </div>
   </header>
@@ -258,20 +263,61 @@ async function api(path, options) {
   return data;
 }
 
-function toggleTheme() {
+const THEME_MODES = ["auto", "light", "dark"];
+const THEME_LABEL = { auto: "跟随系统", light: "浅色", dark: "深色" };
+
+function prefersLight() {
+  return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches);
+}
+
+function resolveTheme(mode) {
+  return mode === "auto" ? (prefersLight() ? "light" : "dark") : mode;
+}
+
+function applyTheme(mode) {
   const root = document.documentElement;
-  const next = root.getAttribute("data-theme") === "light" ? "dark" : "light";
-  root.setAttribute("data-theme", next);
-  try { localStorage.setItem("mmp_theme", next); } catch (e) {}
+  root.setAttribute("data-theme-mode", mode);
+  root.setAttribute("data-theme", resolveTheme(mode));
+  try { localStorage.setItem("mmp_theme", mode); } catch (e) {}
   syncThemeButton();
+}
+
+function currentMode() {
+  const stored = document.documentElement.getAttribute("data-theme-mode");
+  return THEME_MODES.includes(stored) ? stored : "auto";
+}
+
+function toggleTheme() {
+  const mode = currentMode();
+  applyTheme(THEME_MODES[(THEME_MODES.indexOf(mode) + 1) % THEME_MODES.length]);
 }
 
 function syncThemeButton() {
   const btn = $("themeBtn");
   if (!btn) return;
-  const isLight = document.documentElement.getAttribute("data-theme") === "light";
-  btn.textContent = isLight ? "深色" : "浅色";
-  btn.title = isLight ? "切换到深色主题" : "切换到浅色主题";
+  const mode = currentMode();
+  const resolved = resolveTheme(mode);
+  btn.textContent = THEME_LABEL[mode];
+  if (mode === "auto") {
+    btn.title = "跟随系统（当前" + (resolved === "light" ? "浅色" : "深色") + "），点击切到浅色";
+  } else if (mode === "light") {
+    btn.title = "固定浅色，点击切到深色";
+  } else {
+    btn.title = "固定深色，点击切回跟随系统";
+  }
+}
+
+/** Re-resolve when the OS flips while the page is open and the mode is auto. */
+if (window.matchMedia) {
+  const query = window.matchMedia("(prefers-color-scheme: light)");
+  const onChange = () => {
+    if (currentMode() === "auto") {
+      document.documentElement.setAttribute("data-theme", resolveTheme("auto"));
+      syncThemeButton();
+    }
+  };
+  if (query.addEventListener) query.addEventListener("change", onChange);
+  else if (query.addListener) query.addListener(onChange);
 }
 syncThemeButton();
 
