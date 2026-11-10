@@ -3,6 +3,11 @@ main = "src/index.ts"
 compatibility_date = "2026-01-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Keep these above the array-of-table sections below. TOML scopes any bare key
+# that follows a `[[table]]` into that table, which silently breaks the binding.
+workers_dev = true
+preview_urls = false
+
 # This repo ships with a live KV namespace id so the Cloudflare Git integration
 # can deploy it as-is. Forking and deploying under your own account? Replace the
 # id below with one from `wrangler kv namespace create REGISTRY`.
@@ -18,9 +23,6 @@ new_sqlite_classes = ["KeyPool"]
 [[durable_objects.bindings]]
 name = "KEY_POOL"
 class_name = "KeyPool"
-
-workers_dev = true
-preview_urls = false
 
 [observability]
 [observability.logs]
