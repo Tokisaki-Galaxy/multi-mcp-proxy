@@ -13,11 +13,14 @@
     "check:ui": "node scripts/check-ui.mjs"
   },
   "dependencies": {
-    "hono": "^4.12.3"
+    "hono": "4.12.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260305.0",
-    "typescript": "^5.9.3",
-    "wrangler": "^4.69.0"
+    "@cloudflare/workers-types": "4.20260305.0",
+    "typescript": "5.9.3",
+    "wrangler": "4.69.0"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }
