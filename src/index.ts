@@ -8,6 +8,7 @@ import {
   isValidServiceId,
 } from "./registry";
 import { ADMIN_HTML } from "./admin-ui";
+import { parseKeyInput } from "./key-input";
 import type { ServiceConfig, QuotaRules, AuthStyle, UsageProbe } from "./types";
 import type { KeyPool } from "./pool";
 
@@ -172,20 +173,20 @@ app.post("/api/services/:id/keys", async (c) => {
   const body = await c.req.json<{ keys?: unknown; weight?: number }>().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
 
-  // Accept either a string (one per line, so pasting a column of keys works)
-  // or an array of strings.
-  const rawList: string[] = Array.isArray(body.keys)
-    ? body.keys.map(String)
-    : typeof body.keys === "string"
-      ? body.keys.split(/[\r\n,]+/)
-      : [];
-
-  const keys = rawList
-    .map((k) => k.trim())
-    .filter((k) => k.length > 0)
-    .map((secret) => ({ secret }));
-
+  const keys = parseKeyInput(body.keys);
   if (keys.length === 0) return c.json({ error: "No keys provided" }, 400);
+
+  // A label may repeat across different secrets, but not within one batch: a
+  // duplicated label would make the panel unreadable without telling anyone.
+  const seenLabels = new Set<string>();
+  for (const entry of keys) {
+    if (!entry.label) continue;
+    const key = entry.label.toLowerCase();
+    if (seenLabels.has(key)) {
+      return c.json({ error: `Duplicated note in this batch: ${entry.label}` }, 400);
+    }
+    seenLabels.add(key);
+  }
 
   const weight = Number.isFinite(body.weight) ? Math.max(1, Math.min(100, Number(body.weight))) : 1;
   const result = await poolFor(c.env, id).addKeys(keys, weight);

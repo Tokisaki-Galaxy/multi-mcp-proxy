@@ -57,6 +57,7 @@ const CSS = `
     border-bottom: 1px solid var(--border); font-size: 11.5px;
     text-transform: uppercase; letter-spacing: .5px;
   }
+  td.note { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
   tr:last-child td { border-bottom: 0; }
   code { font-family: var(--mono); font-size: 12px; }
@@ -318,15 +319,19 @@ function quotaText(k) {
 
 function keyRows(serviceId, keys) {
   if (!keys.length) return '<div class="empty">还没有密钥</div>';
-  let html = '<table><thead><tr><th>密钥</th><th>状态</th><th>余额</th><th>权重</th><th>最后使用</th><th></th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>密钥</th><th>备注</th><th>状态</th><th>余额</th><th>权重</th><th>最后使用</th><th></th></tr></thead><tbody>';
   for (const k of keys) {
     html += "<tr>";
     html += "<td><code>" + esc(k.mask) + "</code></td>";
+    html += '<td class="note">' + (k.label ? esc(k.label) : '<span class="muted">–</span>') + "</td>";
     html += '<td><span class="badge ' + esc(k.status) + '">' + esc(k.status) + "</span></td>";
     html += "<td>" + quotaText(k) + "</td>";
     html += "<td>" + esc(k.weight) + "</td>";
     html += '<td class="muted">' + ago(k.lastUsedAt) + "</td>";
-    html += '<td style="text-align:right"><button class="danger sm" data-act="del-key" data-svc="' + esc(serviceId) + '" data-key="' + esc(k.id) + '">删除</button></td>';
+    html += '<td style="text-align:right;white-space:nowrap">' +
+      '<button class="ghost sm" data-act="edit-note" data-svc="' + esc(serviceId) + '" data-key="' + esc(k.id) + '" data-label="' + esc(k.label || "") + '">备注</button> ' +
+      '<button class="danger sm" data-act="del-key" data-svc="' + esc(serviceId) + '" data-key="' + esc(k.id) + '">删除</button>' +
+      "</td>";
     html += "</tr>";
   }
   return html + "</tbody></table>";
@@ -362,7 +367,7 @@ async function loadServices() {
         '<div class="divider"></div>' +
         '<div class="keys" id="keys-' + esc(s.id) + '"><div class="empty">加载中…</div></div>' +
         '<div class="row" style="margin-top:12px">' +
-          '<textarea id="addkeys-' + esc(s.id) + '" placeholder="每行一个密钥，可一次粘贴多个"></textarea>' +
+          '<textarea id="addkeys-' + esc(s.id) + '" placeholder="每行一个密钥。想加备注就在密钥后面跟一个逗号，例如：&#10;tvly-abc123,小号一号&#10;tvly-def456,备用"></textarea>' +
         "</div>" +
         '<div class="toolbar">' +
           '<button class="ghost sm" data-act="sync-keys" data-svc="' + esc(s.id) + '">同步余额</button>' +
@@ -421,6 +426,21 @@ async function delKey(serviceId, keyId) {
   }
 }
 
+async function editNote(serviceId, keyId, current) {
+  const next = prompt("备注（留空则清除）", current || "");
+  if (next === null) return;
+  try {
+    await api("/api/services/" + encodeURIComponent(serviceId) + "/keys/" + encodeURIComponent(keyId), {
+      method: "PATCH",
+      body: JSON.stringify({ label: next.trim() }),
+    });
+    setMsg("keymsg-" + serviceId, "备注已更新", false);
+    loadKeys(serviceId);
+  } catch (e) {
+    setMsg("keymsg-" + serviceId, e.message, true);
+  }
+}
+
 async function syncKeys(serviceId) {
   try {
     const res = await api("/api/services/" + encodeURIComponent(serviceId) + "/keys/sync", { method: "POST" });
@@ -452,6 +472,7 @@ document.addEventListener("click", function (ev) {
   else if (act === "del-service") delService(svc);
   else if (act === "sync-keys") syncKeys(svc);
   else if (act === "add-keys") addKeys(svc);
+  else if (act === "edit-note") editNote(svc, btn.getAttribute("data-key") || "", btn.getAttribute("data-label") || "");
 });
 
 if (localStorage.getItem(AUTH_STORE)) boot();
