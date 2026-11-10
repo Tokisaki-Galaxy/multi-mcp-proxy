@@ -47,11 +47,15 @@ test("maskKey keeps head and tail of a long credential", () => {
   assert.equal(maskKey("sk-proj-0123456789abcdef"), "sk-pro...cdef");
 });
 
-test("maskKey shortens short credentials to four characters", () => {
-  assert.equal(maskKey("abcdefghij"), "abcd...");
-  assert.equal(maskKey("abc"), "abc...");
+test("maskKey shortens short credentials but keeps a tail", () => {
+  assert.equal(maskKey("abcdefghij"), "abcd...ij");
+  assert.equal(maskKey("abc"), "ab...");
   assert.equal(maskKey(""), "");
   assert.equal(maskKey("   "), "");
+});
+
+test("maskKey keeps two different short keys distinguishable", () => {
+  assert.notEqual(maskKey("key-note-1"), maskKey("key-note-2"));
 });
 
 /* ---- ranking ---- */
@@ -160,22 +164,22 @@ test("shareOf keeps manual exhaustion permanently parked", () => {
 });
 
 test("shareOf keeps a rate-limited key active and sets a cooldown", () => {
-  const now = Date.UTC(2026, 4, 10, 6, 0, 0);
+  const now = Date.UTC(2026, 4, 10, 6, 0, 0) / 1000;
   const t = shareOf("active", verdict("cooldown", { status: 429, retryAfterMs: 1500 }), monthRules, now);
-  assert.deepEqual(t, { status: "active", cooldownUntil: now + 1500, resetAt: 0 });
+  assert.deepEqual(t, { status: "active", cooldownUntil: now + 2, resetAt: 0 });
 });
 
 test("shareOf falls back to the default cooldown when Retry-After is absent", () => {
-  const now = Date.UTC(2026, 4, 10, 6, 0, 0);
+  const now = Date.UTC(2026, 4, 10, 6, 0, 0) / 1000;
   const t = shareOf("active", verdict("cooldown", { status: 429 }), monthRules, now);
-  assert.equal(t.cooldownUntil, now + DEFAULT_COOLDOWN_MS);
+  assert.equal(t.cooldownUntil, now + DEFAULT_COOLDOWN_MS / 1000);
 });
 
 test("shareOf ignores a nonsense Retry-After value", () => {
-  const now = Date.UTC(2026, 4, 10, 6, 0, 0);
+  const now = Date.UTC(2026, 4, 10, 6, 0, 0) / 1000;
   for (const bad of [-1, 0, Number.NaN]) {
     const t = shareOf("active", verdict("cooldown", { retryAfterMs: bad }), monthRules, now);
-    assert.equal(t.cooldownUntil, now + DEFAULT_COOLDOWN_MS);
+    assert.equal(t.cooldownUntil, now + DEFAULT_COOLDOWN_MS / 1000);
   }
 });
 

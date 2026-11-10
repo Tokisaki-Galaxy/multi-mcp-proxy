@@ -72,7 +72,15 @@ pnpm deploy
 
 新增服务时可以从预置里选 Tavily、Firecrawl 或 Exa，字段会自动填好。自定义服务填服务 ID、上游地址、凭证字段名即可。
 
-然后粘贴密钥，一行一个，批量导入。
+然后粘贴密钥，一行一个，批量导入。想给密钥加备注，就在密钥后面跟一个逗号再写备注：
+
+```
+tvly-abc123,小号一号
+tvly-def456,备用
+tvly-ghi789
+```
+
+备注只是给人看的，代理不会把它发给上游。面板里每条密钥后面有个「备注」按钮，可以随时改或者清空。
 
 ## 客户端接入
 
@@ -106,7 +114,7 @@ https://你的域名/服务ID/mcp
 | POST | `/api/services` | 新增或更新服务 |
 | DELETE | `/api/services/:id` | 删除服务及其密钥 |
 | GET | `/api/services/:id/keys` | 列出密钥，只返回掩码 |
-| POST | `/api/services/:id/keys` | 批量添加密钥 |
+| POST | `/api/services/:id/keys` | 批量添加密钥，每行一个，可选 `密钥,备注` |
 | PATCH | `/api/services/:id/keys/:keyId` | 改权重、状态或备注 |
 | DELETE | `/api/services/:id/keys` | 批量删除 |
 | POST | `/api/services/:id/keys/sync` | 从上游拉取真实余额 |

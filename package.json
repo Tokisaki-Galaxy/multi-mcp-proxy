@@ -8,7 +8,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/classify.test.ts test/pool.test.ts test/integration.test.ts",
+    "test": "node --test test/classify.test.ts test/pool.test.ts test/parse-keys.test.ts test/integration.test.ts",
     "e2e": "node scripts/e2e-exa.mjs",
     "check:ui": "node scripts/check-ui.mjs"
   },

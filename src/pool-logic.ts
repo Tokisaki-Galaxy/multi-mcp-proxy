@@ -63,7 +63,13 @@ function daysInMonthUtc(year: number, month: number): number {
 export function maskKey(secret: string): string {
   const value = typeof secret === "string" ? secret.trim() : "";
   if (value.length === 0) return "";
-  if (value.length <= SHORT_KEY_MAX) return `${value.slice(0, 4)}...`;
+
+  // Short keys would collapse to the same mask if only the head were shown,
+  // which makes two different keys look identical in the panel. Keep a tail
+  // for anything long enough to have one.
+  if (value.length <= SHORT_KEY_MAX) {
+    return value.length <= 6 ? `${value.slice(0, 2)}...` : `${value.slice(0, 4)}...${value.slice(-2)}`;
+  }
   return `${value.slice(0, MASK_HEAD)}...${value.slice(-MASK_TAIL)}`;
 }
 
@@ -156,7 +162,12 @@ export function shareOf(
     case "exhausted":
       return { status: "exhausted", cooldownUntil: 0, resetAt: computeResetAt(rules, now) };
     case "cooldown":
-      return { status: "active", cooldownUntil: now + normaliseRetryAfter(result.retryAfterMs), resetAt: 0 };
+      // The classifier reports milliseconds; cooldown_until is unix seconds.
+      return {
+        status: "active",
+        cooldownUntil: now + Math.ceil(normaliseRetryAfter(result.retryAfterMs) / 1000),
+        resetAt: 0,
+      };
     case "server":
     case "network":
     case "client":

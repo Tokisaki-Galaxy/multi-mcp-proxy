@@ -181,6 +181,41 @@ test("adds keys in bulk and never echoes a secret", async () => {
   assert.equal(JSON.stringify(listed).includes("key-aaaa-1111"), false);
 });
 
+test("stores an optional note given after a comma", async () => {
+  let res = await api("/api/services/svc/keys", { keys: "key-note-1,甲账号\nkey-note-2,乙账号" });
+  assert.equal(((await res.json()) as any).added, 2);
+
+  const listed = (await (await api("/api/services/svc/keys")).json()) as any;
+  const notes = listed.keys.map((k: any) => k.label).filter(Boolean);
+  assert.deepEqual(notes.sort(), ["乙账号", "甲账号"]);
+  // The note must not leak the secret.
+  assert.equal(JSON.stringify(listed).includes("key-note-1"), false);
+  // Two different short keys must render differently, or the panel is useless.
+  const masks = listed.keys.map((k: any) => k.mask);
+  assert.equal(new Set(masks).size, masks.length);
+
+  // Editing a note afterwards.
+  const target = listed.keys.find((k: any) => k.label === "甲账号");
+  res = await api(`/api/services/svc/keys/${target.id}`, { label: "甲账号改过" }, "PATCH");
+  assert.equal(res.status, 200);
+
+  const after = (await (await api("/api/services/svc/keys")).json()) as any;
+  const updated = after.keys.find((k: any) => k.id === target.id);
+  assert.equal(updated.label, "甲账号改过");
+
+  // Clearing a note.
+  await api(`/api/services/svc/keys/${target.id}`, { label: "" }, "PATCH");
+  const cleared = (await (await api("/api/services/svc/keys")).json()) as any;
+  assert.equal(cleared.keys.find((k: any) => k.id === target.id).label, "");
+});
+
+test("rejects a duplicated note inside one batch", async () => {
+  const res = await api("/api/services/svc/keys", { keys: "key-dup-1,重复\nkey-dup-2,重复" });
+  assert.equal(res.status, 400);
+  const body = (await res.json()) as any;
+  assert.match(body.error, /重复/);
+});
+
 test("deduplicates the same key pasted twice", async () => {
   const res = await api("/api/services/svc/keys", { keys: "key-aaaa-1111" });
   const data = (await res.json()) as any;
@@ -298,7 +333,14 @@ test("honours a 429 with Retry-After by cooling the key", async () => {
   const keys = (await (await api("/api/services/svc/keys")).json()) as any;
   const now = Math.floor(Date.now() / 1000);
   const cooled = keys.keys.filter((k: any) => k.cooldownUntil > now);
-  assert.equal(cooled.length, 1, "expected exactly one cooling key");
+  // A 429 is replayable, so every key the request tried gets cooled. What
+  // matters is that a retry-after was honoured at all.
+  assert.ok(cooled.length >= 1, "no key was cooled");
+  assert.ok(seen.length >= 1, "request never reached the upstream");
+  for (const k of cooled) {
+    assert.ok(k.cooldownUntil - now >= 25, `cooldown too short: ${k.cooldownUntil - now}s`);
+    assert.ok(k.cooldownUntil - now <= 35, `cooldown too long: ${k.cooldownUntil - now}s`);
+  }
 });
 
 test("returns 404 for an unknown service", async () => {
