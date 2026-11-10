@@ -1,0 +1,24 @@
+name = "multi-mcp-proxy"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Durable Objects require at least one migration declaration.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["KeyPool"]
+
+[[durable_objects.bindings]]
+name = "KEY_POOL"
+class_name = "KeyPool"
+
+# Service registry + key metadata. Config is low-write (admin writes only),
+# so KV is a fine home for it; the hot-path key state lives in the DO.
+[[kv_namespaces]]
+binding = "REGISTRY"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[observability]
+[observability.logs]
+enabled = true
+invocation_logs = true

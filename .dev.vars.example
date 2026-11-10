@@ -1,0 +1,2 @@
+PROXY_KEY=change-me-to-a-random-string
+ENCRYPTION_KEY=change-me-to-another-random-32-byte-string
