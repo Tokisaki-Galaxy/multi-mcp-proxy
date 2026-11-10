@@ -204,9 +204,10 @@ const HTML = `<!doctype html>
           <div class="row" style="margin-top:10px">
             <label class="field"><span>已用字段路径</span><input id="f-usageUsed" placeholder="key.usage" /></label>
             <label class="field"><span>上限字段路径</span><input id="f-usageLimit" placeholder="key.limit" /></label>
+            <label class="field"><span>上限备用路径</span><input id="f-usageLimitFallback" placeholder="account.plan_limit" /></label>
             <label class="field"><span>剩余字段路径</span><input id="f-usageRemaining" placeholder="data.remainingCredits" /></label>
           </div>
-          <div class="hint">路径用点号分隔，例如 <span class="kbd">data.remainingCredits</span>。填了「剩余字段」时，已用量由上限减剩余推出来。</div>
+          <div class="hint">路径用点号分隔，例如 <span class="kbd">data.remainingCredits</span>。上限为 null 时会尝试「上限备用路径」，Tavily 的 key.limit 就常常是 null。填了「剩余字段」时，已用量由上限减剩余推出来。</div>
         </div>
         <div class="toolbar">
           <button type="submit">保存服务</button>
@@ -353,7 +354,7 @@ const PRESETS = {
     usage: {
       url: "https://api.tavily.com/usage",
       authName: "Authorization", authPrefix: "Bearer ",
-      used: "key.usage", limit: "key.limit", remaining: "",
+      used: "key.usage", limit: "key.limit", limitFallback: "account.plan_limit", remaining: "",
     },
   },
   firecrawl: {
@@ -364,7 +365,7 @@ const PRESETS = {
     usage: {
       url: "https://api.firecrawl.dev/v2/team/credit-usage",
       authName: "Authorization", authPrefix: "Bearer ",
-      used: "", limit: "data.planCredits", remaining: "data.remainingCredits",
+      used: "", limit: "data.planCredits", limitFallback: "", remaining: "data.remainingCredits",
     },
   },
   exa: {
@@ -395,6 +396,7 @@ function fillUsage(u) {
   $("f-usageAuthPrefix").value = u ? u.authPrefix : "";
   $("f-usageUsed").value = u ? u.used : "";
   $("f-usageLimit").value = u ? u.limit : "";
+  $("f-usageLimitFallback").value = u ? u.limitFallback : "";
   $("f-usageRemaining").value = u ? u.remaining : "";
 
   // Open the section when there is something to show, so preset users see it.
@@ -446,6 +448,7 @@ async function addService() {
         },
         usedPath: $("f-usageUsed").value.trim() || undefined,
         limitPath: $("f-usageLimit").value.trim() || undefined,
+        limitFallbackPath: $("f-usageLimitFallback").value.trim() || undefined,
         remainingPath: $("f-usageRemaining").value.trim() || undefined,
       }
     : undefined;
