@@ -52,7 +52,7 @@ data: {"result":{"content":[{"type":"text","text":"The Firecrawl API key is inva
 
 ## 快速开始
 
-需要一个 Cloudflare 账号，免费版即可。
+需要一个 Cloudflare 账号，免费版即可。本仓库已经绑定了一个线上的 KV 命名空间，直接在 Cloudflare 控制台接 Git 部署即可跑起来。如果是 fork 到自己账号，把 `wrangler.toml` 里的 KV id 换成自己创建的。
 
 ```bash
 pnpm install

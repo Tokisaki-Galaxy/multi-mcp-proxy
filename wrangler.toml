@@ -3,6 +3,13 @@ main = "src/index.ts"
 compatibility_date = "2026-01-01"
 compatibility_flags = ["nodejs_compat"]
 
+# This repo ships with a live KV namespace id so the Cloudflare Git integration
+# can deploy it as-is. Forking and deploying under your own account? Replace the
+# id below with one from `wrangler kv namespace create REGISTRY`.
+[[kv_namespaces]]
+binding = "REGISTRY"
+id = "da4b26ffa5434ee09a1160c89fbbfd4a"
+
 # Durable Objects require at least one migration declaration.
 [[migrations]]
 tag = "v1"
@@ -12,11 +19,8 @@ new_sqlite_classes = ["KeyPool"]
 name = "KEY_POOL"
 class_name = "KeyPool"
 
-# Service registry + key metadata. Config is low-write (admin writes only),
-# so KV is a fine home for it; the hot-path key state lives in the DO.
-[[kv_namespaces]]
-binding = "REGISTRY"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+workers_dev = true
+preview_urls = false
 
 [observability]
 [observability.logs]
