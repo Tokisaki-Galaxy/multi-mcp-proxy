@@ -19,11 +19,29 @@ const CSS = `
     --warn: #f5b544;
     --bad: #f87171;
     --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+    --shadow: none;
+  }
+  [data-theme="light"] {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --panel-2: #f2f4f7;
+    --border: #e2e6ec;
+    --text: #1c2430;
+    --muted: #67707e;
+    --accent: #5b4bdb;
+    --ok: #0a7a53;
+    --warn: #a86700;
+    --bad: #c72b2b;
+    --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+    --shadow: 0 1px 2px rgba(16, 24, 40, .04), 0 1px 3px rgba(16, 24, 40, .06);
   }
   * { box-sizing: border-box; }
+  html { color-scheme: dark; }
+  html[data-theme="light"] { color-scheme: light; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
     font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    transition: background .12s ease, color .12s ease;
   }
   .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 18px 80px; }
   header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 26px; }
@@ -31,7 +49,7 @@ const CSS = `
   .sub { color: var(--muted); font-size: 12.5px; }
   .card {
     background: var(--panel); border: 1px solid var(--border);
-    border-radius: 10px; padding: 16px; margin-bottom: 14px;
+    border-radius: 10px; padding: 16px; margin-bottom: 14px; box-shadow: var(--shadow);
   }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   label.field { display: flex; flex-direction: column; gap: 5px; flex: 1; min-width: 170px; }
@@ -46,7 +64,7 @@ const CSS = `
     background: var(--accent); color: #fff; border: 0; border-radius: 6px;
     padding: 9px 14px; font-size: 13.5px; cursor: pointer; white-space: nowrap;
   }
-  button:hover { filter: brightness(1.12); }
+  button:hover { filter: brightness(1.08); }
   button:disabled { opacity: .45; cursor: not-allowed; }
   button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
   button.danger { background: transparent; color: var(--bad); border: 1px solid var(--border); }
@@ -65,6 +83,9 @@ const CSS = `
   .badge.active { background: rgba(53,211,154,.14); color: var(--ok); }
   .badge.cooling { background: rgba(245,181,68,.14); color: var(--warn); }
   .badge.exhausted, .badge.invalid { background: rgba(248,113,113,.14); color: var(--bad); }
+  [data-theme="light"] .badge.active { background: rgba(15,138,95,.12); }
+  [data-theme="light"] .badge.cooling { background: rgba(168,103,0,.12); }
+  [data-theme="light"] .badge.exhausted, [data-theme="light"] .badge.invalid { background: rgba(199,43,43,.10); }
   .muted { color: var(--muted); }
   .empty { color: var(--muted); text-align: center; padding: 22px 0; font-size: 13px; }
   .msg { font-size: 12.5px; margin-top: 10px; min-height: 17px; }
@@ -80,14 +101,25 @@ const CSS = `
   .toolbar { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
   .kbd { font-family: var(--mono); font-size: 11.5px; background: var(--panel-2); padding: 2px 6px; border-radius: 4px; }
   .warnbox { border-left: 3px solid var(--warn); background: rgba(245,181,68,.07); padding: 10px 12px; font-size: 12.5px; color: var(--muted); border-radius: 4px; }
+  [data-theme="light"] .warnbox { background: rgba(168,103,0,.06); }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
 `;
 
 const HTML = `<!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>multi-mcp-proxy 控制台</title>
+<script>
+  // Apply the saved theme before first paint so there is no flash.
+  try {
+    var savedTheme = localStorage.getItem("mmp_theme");
+    if (savedTheme === "light" || savedTheme === "dark") {
+      document.documentElement.setAttribute("data-theme", savedTheme);
+    }
+  } catch (e) {}
+</script>
 <style>${CSS}</style>
 </head>
 <body>
@@ -97,7 +129,10 @@ const HTML = `<!doctype html>
       <h1>multi-mcp-proxy</h1>
       <div class="sub">多服务 MCP 透明反代与密钥池</div>
     </div>
-    <button id="logoutBtn" class="ghost hidden" onclick="logout()">注销</button>
+    <div class="row" style="flex:0 0 auto">
+      <button id="themeBtn" class="ghost" onclick="toggleTheme()" title="切换明暗主题">浅色</button>
+      <button id="logoutBtn" class="ghost hidden" onclick="logout()">注销</button>
+    </div>
   </header>
 
   <div class="card" id="loginCard">
@@ -146,6 +181,27 @@ const HTML = `<!doctype html>
           <label class="field"><span>额度耗尽状态码</span><input id="f-exhausted" placeholder="402,432,433" /></label>
           <label class="field"><span>限流状态码</span><input id="f-cooldown" placeholder="429" /></label>
           <label class="field"><span>失效状态码</span><input id="f-invalid" placeholder="401" /></label>
+        </div>
+        <div class="divider"></div>
+        <div class="row">
+          <div class="svc-title" style="flex:1">余额查询接口（可选）</div>
+          <button type="button" class="ghost sm" onclick="toggleUsageFields()" id="usageToggleBtn">展开</button>
+        </div>
+        <div class="hint">上游有官方余额接口时填这里，面板的「同步余额」才能用。留空则该服务只能看密钥状态，看不到剩余额度。</div>
+        <div id="usageFields" class="hidden">
+          <div class="row" style="margin-top:10px">
+            <label class="field" style="flex:3"><span>余额接口地址</span><input id="f-usageUrl" placeholder="https://api.firecrawl.dev/v2/team/credit-usage" /></label>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <label class="field"><span>认证头名称</span><input id="f-usageAuthName" placeholder="Authorization" /></label>
+            <label class="field"><span>认证前缀</span><input id="f-usageAuthPrefix" placeholder="Bearer " /></label>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <label class="field"><span>已用字段路径</span><input id="f-usageUsed" placeholder="key.usage" /></label>
+            <label class="field"><span>上限字段路径</span><input id="f-usageLimit" placeholder="key.limit" /></label>
+            <label class="field"><span>剩余字段路径</span><input id="f-usageRemaining" placeholder="data.remainingCredits" /></label>
+          </div>
+          <div class="hint">路径用点号分隔，例如 <span class="kbd">data.remainingCredits</span>。填了「剩余字段」时，已用量由上限减剩余推出来。</div>
         </div>
         <div class="toolbar">
           <button type="submit">保存服务</button>
@@ -202,6 +258,23 @@ async function api(path, options) {
   return data;
 }
 
+function toggleTheme() {
+  const root = document.documentElement;
+  const next = root.getAttribute("data-theme") === "light" ? "dark" : "light";
+  root.setAttribute("data-theme", next);
+  try { localStorage.setItem("mmp_theme", next); } catch (e) {}
+  syncThemeButton();
+}
+
+function syncThemeButton() {
+  const btn = $("themeBtn");
+  if (!btn) return;
+  const isLight = document.documentElement.getAttribute("data-theme") === "light";
+  btn.textContent = isLight ? "深色" : "浅色";
+  btn.title = isLight ? "切换到深色主题" : "切换到浅色主题";
+}
+syncThemeButton();
+
 function login() {
   const value = $("authInput").value.trim();
   if (!value) return;
@@ -231,20 +304,56 @@ const PRESETS = {
     url: "https://mcp.tavily.com/mcp",
     authType: "header", authName: "Authorization", authPrefix: "Bearer ",
     exhausted: "402,432,433", cooldown: "429", invalid: "401",
+    usage: {
+      url: "https://api.tavily.com/usage",
+      authName: "Authorization", authPrefix: "Bearer ",
+      used: "key.usage", limit: "key.limit", remaining: "",
+    },
   },
   firecrawl: {
     id: "firecrawl", name: "Firecrawl",
     url: "https://mcp.firecrawl.dev/mcp",
     authType: "header", authName: "x-api-key", authPrefix: "",
     exhausted: "402", cooldown: "429", invalid: "401",
+    usage: {
+      url: "https://api.firecrawl.dev/v2/team/credit-usage",
+      authName: "Authorization", authPrefix: "Bearer ",
+      used: "", limit: "data.planCredits", remaining: "data.remainingCredits",
+    },
   },
   exa: {
     id: "exa", name: "Exa",
     url: "https://mcp.exa.ai/mcp",
     authType: "header", authName: "x-api-key", authPrefix: "",
     exhausted: "402", cooldown: "429", invalid: "401",
+    usage: null,
   },
 };
+
+/** Exa has no per-key balance endpoint on regular keys, only Team Management. */
+const USAGE_PRESET_NOTE = {
+  exa: "Exa 普通 API key 没有官方余额接口，只有开通 Team Management 后才有，因此这个服务的余额需要留空。",
+};
+
+function toggleUsageFields() {
+  const box = $("usageFields");
+  const btn = $("usageToggleBtn");
+  const open = box.classList.contains("hidden");
+  box.classList.toggle("hidden", !open);
+  btn.textContent = open ? "收起" : "展开";
+}
+
+function fillUsage(u) {
+  $("f-usageUrl").value = u ? u.url : "";
+  $("f-usageAuthName").value = u ? u.authName : "";
+  $("f-usageAuthPrefix").value = u ? u.authPrefix : "";
+  $("f-usageUsed").value = u ? u.used : "";
+  $("f-usageLimit").value = u ? u.limit : "";
+  $("f-usageRemaining").value = u ? u.remaining : "";
+
+  // Open the section when there is something to show, so preset users see it.
+  if (u && $("usageFields").classList.contains("hidden")) toggleUsageFields();
+}
 
 function applyPreset() {
   const key = $("preset").value;
@@ -256,6 +365,8 @@ function applyPreset() {
     $("f-exhausted").value = "402,432,433";
     $("f-cooldown").value = "429";
     $("f-invalid").value = "401";
+    fillUsage(null);
+    setMsg("svcMsg", "", false);
     return;
   }
   const p = PRESETS[key];
@@ -268,6 +379,8 @@ function applyPreset() {
   $("f-exhausted").value = p.exhausted;
   $("f-cooldown").value = p.cooldown;
   $("f-invalid").value = p.invalid;
+  fillUsage(p.usage);
+  setMsg("svcMsg", USAGE_PRESET_NOTE[key] || "", false);
 }
 
 function nums(str, fallback) {
@@ -276,6 +389,21 @@ function nums(str, fallback) {
 }
 
 async function addService() {
+  const usageUrl = $("f-usageUrl").value.trim();
+  const usage = usageUrl
+    ? {
+        url: usageUrl,
+        style: {
+          type: "header",
+          name: $("f-usageAuthName").value.trim() || "Authorization",
+          prefix: $("f-usageAuthPrefix").value,
+        },
+        usedPath: $("f-usageUsed").value.trim() || undefined,
+        limitPath: $("f-usageLimit").value.trim() || undefined,
+        remainingPath: $("f-usageRemaining").value.trim() || undefined,
+      }
+    : undefined;
+
   const body = {
     id: $("f-id").value.trim().toLowerCase(),
     name: $("f-name").value.trim(),
@@ -292,10 +420,11 @@ async function addService() {
       reset: "month",
       resetDay: 1,
     },
+    usage,
   };
   try {
     await api("/api/services", { method: "POST", body: JSON.stringify(body) });
-    setMsg("svcMsg", "已保存", false);
+    setMsg("svcMsg", usage ? "已保存，带余额接口" : "已保存（无余额接口）", false);
     loadServices();
   } catch (e) {
     setMsg("svcMsg", e.message, true);
