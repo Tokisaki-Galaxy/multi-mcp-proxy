@@ -303,6 +303,118 @@ function fromBase64(text: string): Uint8Array {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Resource affinity.                                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Bounds on what counts as a possible resource id.
+ *
+ * Ids are opaque tokens: UUIDs, or upstream prefixed forms such as `fc1.xxx`.
+ * They never contain whitespace and are never a whole sentence. Filtering on that
+ * keeps a search query or a long instruction from being treated as an id.
+ */
+export const AFFINITY_MIN_ID_LENGTH = 8;
+export const AFFINITY_MAX_ID_LENGTH = 128;
+/** Cap on candidates pulled out of one request, so a huge argument cannot bloat the lookup. */
+export const AFFINITY_MAX_CANDIDATES = 64;
+/** How deep to walk an argument tree looking for ids. */
+export const AFFINITY_MAX_DEPTH = 4;
+
+function looksLikeResourceId(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (value.length < AFFINITY_MIN_ID_LENGTH || value.length > AFFINITY_MAX_ID_LENGTH) return false;
+  return !/\s/.test(value);
+}
+
+/**
+ * Collect string values from a request argument tree that could be resource ids.
+ *
+ * This does not consult the ledger; it only narrows the input. The final say
+ * belongs to the lookup, which matches against ids the proxy actually minted.
+ */
+export function collectCandidateIds(args: unknown, limit = AFFINITY_MAX_CANDIDATES): string[] {
+  const found: string[] = [];
+  const seen = new Set<string>();
+
+  const walk = (value: unknown, depth: number): void => {
+    if (found.length >= limit || depth > AFFINITY_MAX_DEPTH) return;
+
+    if (looksLikeResourceId(value)) {
+      if (!seen.has(value)) {
+        seen.add(value);
+        found.push(value);
+      }
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (found.length >= limit) return;
+        walk(item, depth + 1);
+      }
+      return;
+    }
+
+    if (value && typeof value === "object") {
+      for (const item of Object.values(value as Record<string, unknown>)) {
+        if (found.length >= limit) return;
+        walk(item, depth + 1);
+      }
+    }
+  };
+
+  walk(args, 0);
+  return found;
+}
+
+/**
+ * Pull resource ids out of an MCP tool result.
+ *
+ * Only the declared field names are read, and only at the top level of each
+ * result object. Searching deeper would pick up ids belonging to unrelated rows,
+ * such as every hit in a search response, which would then pin future requests to
+ * keys that never created them.
+ */
+export function collectResultIds(payload: unknown, fields: string[]): string[] {
+  if (!payload || typeof payload !== "object" || fields.length === 0) return [];
+  const envelope = payload as Record<string, unknown>;
+  const inner = envelope.result;
+  if (!inner || typeof inner !== "object" || Array.isArray(inner)) return [];
+
+  const result = inner as Record<string, unknown>;
+  const objects: unknown[] = [result.structuredContent];
+
+  const blocks = Array.isArray(result.content) ? result.content : [];
+  for (const block of blocks) {
+    if (!block || typeof block !== "object") continue;
+    const record = block as Record<string, unknown>;
+    if (record.type !== "text" || typeof record.text !== "string") continue;
+    const text = record.text.trim();
+    if (!text.startsWith("{")) continue;
+    try {
+      objects.push(JSON.parse(text));
+    } catch {
+      // Prose output, not a resource envelope.
+    }
+  }
+
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const object of objects) {
+    if (!object || typeof object !== "object" || Array.isArray(object)) continue;
+    const record = object as Record<string, unknown>;
+    for (const field of fields) {
+      const value = record[field];
+      if (!looksLikeResourceId(value)) continue;
+      if (seen.has(value)) continue;
+      seen.add(value);
+      out.push(value);
+    }
+  }
+  return out;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Storage plumbing.                                                           */
 /* -------------------------------------------------------------------------- */
 
@@ -347,6 +459,21 @@ CREATE TABLE IF NOT EXISTS keys (
 )`;
 
 export const SCHEMA_INDEX = "CREATE INDEX IF NOT EXISTS keys_status_idx ON keys (status)";
+
+/**
+ * Which key minted a given upstream resource id.
+ *
+ * Rows are disposable: once `expires_at` passes the id is no longer worth
+ * pinning, so the table is swept lazily on write rather than by a cron.
+ */
+export const SCHEMA_TASK_TABLE = `
+CREATE TABLE IF NOT EXISTS task_affinity (
+  resource_id TEXT PRIMARY KEY,
+  key_id TEXT NOT NULL,
+  expires_at INTEGER NOT NULL
+)`;
+
+export const SCHEMA_TASK_INDEX = "CREATE INDEX IF NOT EXISTS task_expiry_idx ON task_affinity (expires_at)";
 
 export function normaliseWeight(weight: number | undefined, fallback: number): number {
   if (weight === undefined || weight === null || !Number.isFinite(weight)) return fallback;

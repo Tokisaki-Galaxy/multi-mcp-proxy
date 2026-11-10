@@ -25,6 +25,8 @@ import {
   PROBE_TIMEOUT_MS,
   SCHEMA_INDEX,
   SCHEMA_TABLE,
+  SCHEMA_TASK_INDEX,
+  SCHEMA_TASK_TABLE,
   bumpErrorCount,
   buildProbeRequest,
   compareCandidates,
@@ -77,6 +79,8 @@ export class KeyPool extends DurableObject<PoolEnv> {
       this.schema = (async () => {
         this.sql.exec(SCHEMA_TABLE);
         this.sql.exec(SCHEMA_INDEX);
+        this.sql.exec(SCHEMA_TASK_TABLE);
+        this.sql.exec(SCHEMA_TASK_INDEX);
       })();
     }
     return this.schema;
@@ -266,6 +270,119 @@ export class KeyPool extends DurableObject<PoolEnv> {
 
     const secret = await this.decryptKey(chosen.secret);
     return { keyId: chosenId, secret, label: chosen.label };
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Resource affinity                                                       */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Which key minted any of these ids, if the proxy still remembers.
+   *
+   * Returns null when none of the candidates is a known resource id, which is
+   * the common case: most requests carry only queries and URLs.
+   */
+  async lookupAffinity(ids: string[]): Promise<string | null> {
+    await this.ensureSchema();
+    const candidates = Array.isArray(ids) ? ids.filter((v) => typeof v === "string" && v.length > 0) : [];
+    if (candidates.length === 0) return null;
+
+    const now = this.now();
+    // One statement per candidate keeps the query shape fixed; the list is small
+    // and already capped by collectCandidateIds.
+    for (const id of candidates.slice(0, 64)) {
+      const row = this.sql
+        .exec("SELECT key_id FROM task_affinity WHERE resource_id = ? AND expires_at > ?", id, now)
+        .toArray() as { key_id: string }[];
+      if (row.length > 0) return row[0]!.key_id;
+    }
+    return null;
+  }
+
+  /**
+   * Remember that `keyId` created these ids.
+   *
+   * Called after a successful tool result. Sweeps expired rows on the way
+   * through so the table does not grow without a cron.
+   */
+  async recordAffinity(ids: string[], keyId: string, ttlSecs: number): Promise<number> {
+    await this.ensureSchema();
+    const key = String(keyId ?? "");
+    if (!key) return 0;
+
+    const list = Array.isArray(ids) ? ids.filter((v) => typeof v === "string" && v.length > 0) : [];
+    if (list.length === 0) return 0;
+
+    const now = this.now();
+    const ttl = Number.isFinite(ttlSecs) && ttlSecs > 0 ? Math.trunc(ttlSecs) : 86_400;
+    const expiresAt = now + ttl;
+
+    this.sql.exec("DELETE FROM task_affinity WHERE expires_at <= ?", now);
+
+    let written = 0;
+    for (const id of list.slice(0, 16)) {
+      this.sql.exec(
+        `INSERT INTO task_affinity (resource_id, key_id, expires_at) VALUES (?, ?, ?)
+         ON CONFLICT(resource_id) DO UPDATE SET key_id = excluded.key_id, expires_at = excluded.expires_at`,
+        id,
+        key,
+        expiresAt
+      );
+      written += 1;
+    }
+    return written;
+  }
+
+  /**
+   * Resolve a pinned key for a request that references an existing resource.
+   *
+   * The caller must not silently fall back to another key: the resource lives on
+   * this account, so a different key would answer 404 and hide the real cause.
+   */
+  async pickPinned(keyId: string): Promise<
+    | { ok: true; key: SelectResult }
+    | { ok: false; reason: "missing" | "unusable"; status: string; cooldownUntil: number }
+  > {
+    await this.ensureSchema();
+    const id = String(keyId ?? "");
+    const rows = this.sql.exec("SELECT * FROM keys WHERE id = ?", id).toArray() as KeyRow[];
+    if (rows.length === 0) {
+      return { ok: false, reason: "missing", status: "missing", cooldownUntil: 0 };
+    }
+
+    const row = rows[0]!;
+    const now = this.now();
+    const cooling = row.cooldown_until > now;
+    if (row.status !== "active" || cooling) {
+      return {
+        ok: false,
+        reason: "unusable",
+        status: cooling ? "cooling" : row.status,
+        cooldownUntil: row.cooldown_until,
+      };
+    }
+
+    this.sql.exec(
+      "UPDATE keys SET last_used_at = ?, use_count = use_count + 1 WHERE id = ?",
+      now,
+      id
+    );
+
+    const secret = await this.decryptKey(row.secret);
+    return { ok: true, key: { keyId: id, secret, label: row.label } };
+  }
+
+  /** Bindings still live, for the admin panel. */
+  async affinityStats(): Promise<{ live: number; expired: number }> {
+    await this.ensureSchema();
+    const now = this.now();
+    const live = this.sql
+      .exec("SELECT COUNT(*) AS n FROM task_affinity WHERE expires_at > ?", now)
+      .one() as { n: number };
+    const expired = this.sql
+      .exec("SELECT COUNT(*) AS n FROM task_affinity WHERE expires_at <= ?", now)
+      .one() as { n: number };
+    return { live: live?.n ?? 0, expired: expired?.n ?? 0 };
   }
 
   async report(keyId: string, result: ClassifyResult, rules: QuotaRules): Promise<void> {

@@ -39,6 +39,24 @@ export interface UsageProbe {
   remainingPath?: string;
 }
 
+/**
+ * Optional resource affinity. Some upstream tools create a job or session that
+ * only the account which created it can read back. Rotating the key between the
+ * create call and the follow-up call makes that task disappear.
+ *
+ * With this enabled the pool remembers which key created which id and pins every
+ * later request that mentions the id to that key.
+ */
+export interface AffinityRules {
+  /**
+   * Field names in a tool result whose string values identify a resource,
+   * for example `id`, `scrapeId`, `uploadRef`.
+   */
+  responseFields: string[];
+  /** How long a binding stays valid, in seconds. */
+  ttlSecs: number;
+}
+
 export interface ServiceConfig {
   /** Path segment, also the Durable Object name. Lowercase, no slashes. */
   id: string;
@@ -49,6 +67,8 @@ export interface ServiceConfig {
   auth: AuthStyle;
   quota: QuotaRules;
   usage?: UsageProbe;
+  /** Resource-to-key binding. Omit to keep plain stateless rotation. */
+  affinity?: AffinityRules;
   /** Retry upstream 5xx once with another key. Off by default: risk of double charge. */
   retryOn5xx: boolean;
   createdAt: number;
