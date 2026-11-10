@@ -278,6 +278,26 @@ test("readProbeValues walks dotted paths for used and limit", () => {
   assert.deepEqual(values, { used: 42, limit: 1000 });
 });
 
+test("readProbeValues falls back to a second limit path", () => {
+  const probe = {
+    url: "",
+    style: { type: "query" as const, name: "k" },
+    usedPath: "key.usage",
+    limitPath: "key.limit",
+    limitFallbackPath: "account.plan_limit",
+  };
+  // Tavily reports key.limit as null on some plans.
+  assert.deepEqual(
+    readProbeValues({ key: { usage: 40, limit: null }, account: { plan_limit: 1000 } }, probe),
+    { used: 40, limit: 1000 }
+  );
+  // A real limit still wins over the fallback.
+  assert.deepEqual(
+    readProbeValues({ key: { usage: 40, limit: 500 }, account: { plan_limit: 1000 } }, probe),
+    { used: 40, limit: 500 }
+  );
+});
+
 test("readProbeValues prefers remaining and derives used from it", () => {
   const body = { key: { remaining: 250, limit: 1000, usage: 7 } };
   const values = readProbeValues(body, {

@@ -239,7 +239,12 @@ export function buildProbeRequest(probe: UsageProbe, secret: string): ProbeReque
  * the remainder is reported.
  */
 export function readProbeValues(body: unknown, probe: UsageProbe): { used: number | null; limit: number | null } {
-  const limit = probe.limitPath ? asNumber(readPath(body, probe.limitPath)) : null;
+  // The limit sometimes sits in a different field depending on the plan, so a
+  // second path is tried before giving up.
+  let limit = probe.limitPath ? asNumber(readPath(body, probe.limitPath)) : null;
+  if (limit === null && probe.limitFallbackPath) {
+    limit = asNumber(readPath(body, probe.limitFallbackPath));
+  }
 
   if (probe.remainingPath) {
     const remaining = asNumber(readPath(body, probe.remainingPath));

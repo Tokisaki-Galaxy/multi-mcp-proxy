@@ -33,6 +33,8 @@ export interface UsageProbe {
   usedPath?: string;
   /** Dotted path to the limit, e.g. "key.limit". */
   limitPath?: string;
+  /** Second place to look when limitPath is absent or null. */
+  limitFallbackPath?: string;
   /** Dotted path to remaining, takes precedence over used/limit. */
   remainingPath?: string;
 }
