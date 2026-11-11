@@ -5,18 +5,18 @@
  * header, forwards the client's headers and body verbatim, and decides whether
  * to replay based on what the upstream answered.
  *
- * Why a first-event peek instead of pure pass-through: all three target
+ * Why a peek instead of pure pass-through: all three target
  * upstreams (Tavily, Firecrawl, Exa) put quota and auth failures inside an
  * HTTP 200 body, as `result.isError` or an embedded error string. A header-only
  * proxy cannot see them, so it would pin every request to a dead key forever.
- * Reading until the first complete SSE event costs about one round trip that
+ * Reading up to the event that ends the request costs about one round trip that
  * the client would have waited for anyway, and lets the rest of the stream flow
  * untouched.
  */
 
 import type { ClassifyResult, QuotaRules, SelectResult, ServiceConfig } from "./types";
 import { classifyHttp, classifyMcpResult } from "./classify";
-import { hasConclusion, ssePayloads } from "./peek";
+import { conclusionProbe, isConclusion, ssePayloads } from "./peek";
 import {
   collectCandidateIds,
   collectResultIds,
@@ -133,8 +133,31 @@ interface PeekResult {
   buffered: Uint8Array[];
   /** Decoded prefix, for classification. */
   text: string;
-  /** True when an event carrying a result or an error was captured. */
-  complete: boolean;
+  /**
+   * A read that was still waiting on the upstream when the peek gave up, so the
+   * stream can pick it up instead of starting a second read on a locked reader.
+   */
+  pending: Promise<ReadableStreamReadResult<Uint8Array>> | null;
+}
+
+/** Marks a race that the read lost, so the pending read can be handed on. */
+const READ_STILL_PENDING = Symbol("read-still-pending");
+
+/** Wait at most `ms` for `pending`, leaving it untouched when the wait runs out. */
+function raceRead<T>(
+  pending: Promise<T>,
+  ms: number
+): { raced: Promise<T | typeof READ_STILL_PENDING>; cancel(): void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<typeof READ_STILL_PENDING>((resolve) => {
+    timer = setTimeout(() => resolve(READ_STILL_PENDING), Math.max(0, ms));
+  });
+  return {
+    raced: Promise.race([pending, expiry]),
+    cancel() {
+      if (timer !== undefined) clearTimeout(timer);
+    },
+  };
 }
 
 /**
@@ -157,40 +180,79 @@ async function peekFirstEvent(
   const decoder = new TextDecoder();
   const buffered: Uint8Array[] = [];
   const isJson = contentType.includes("application/json");
+  const probe = conclusionProbe();
   let text = "";
   let bytes = 0;
   const startedAt = Date.now();
+  let pending: Promise<ReadableStreamReadResult<Uint8Array>> | null = null;
 
   const byteCap = isJson ? JSON_BYTE_CAP : PEEK_BYTE_CAP;
 
   while (bytes < byteCap) {
+    // A stream that says nothing would otherwise hold the client for as long as
+    // the upstream keeps the connection open.
     if (!isJson && Date.now() - startedAt > PEEK_TIME_CAP_MS) break;
-    const { value, done } = await reader.read();
+
+    pending ??= reader.read();
+
+    // The time cap has to reach into the read itself. A slow tool can sit on the
+    // socket for minutes, and this loop only re-checks the clock between reads.
+    let next: ReadableStreamReadResult<Uint8Array> | typeof READ_STILL_PENDING = READ_STILL_PENDING;
+    if (isJson) {
+      next = await pending;
+    } else {
+      const wait = raceRead(pending, PEEK_TIME_CAP_MS - (Date.now() - startedAt));
+      next = await wait.raced;
+      wait.cancel();
+      if (next === READ_STILL_PENDING) break;
+    }
+    pending = null;
+
+    const { value, done } = next;
     if (done) break;
     if (!value) continue;
     buffered.push(value);
     bytes += value.byteLength;
     text += decoder.decode(value, { stream: true });
-    if (!isJson && hasConclusion(text)) {
-      return { peek: { buffered, text, complete: true }, reader };
+    if (!isJson && probe.feed(text)) {
+      return { peek: { buffered, text, pending }, reader };
     }
   }
 
-  return { peek: { buffered, text, complete: false }, reader };
+  return { peek: { buffered, text, pending }, reader };
+}
+
+/** Join buffered chunks back into one body, byte for byte. */
+function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const chunk of chunks) total += chunk.byteLength;
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return out;
 }
 
 /** Splice already-read bytes back in front of the remaining upstream stream. */
 function replayThenStream(
   buffered: Uint8Array[],
-  reader: ReadableStreamDefaultReader<Uint8Array>
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  pending: Promise<ReadableStreamReadResult<Uint8Array>> | null
 ): ReadableStream<Uint8Array> {
+  let inflight = pending;
   return new ReadableStream<Uint8Array>({
     start(controller) {
       for (const chunk of buffered) controller.enqueue(chunk);
     },
     async pull(controller) {
       try {
-        const { value, done } = await reader.read();
+        // Adopt the read the peek abandoned, rather than asking a reader that is
+        // already waiting for a second chunk in parallel.
+        const next = inflight ?? reader.read();
+        inflight = null;
+        const { value, done } = await next;
         if (done) controller.close();
         else if (value) controller.enqueue(value);
       } catch (err) {
@@ -231,6 +293,10 @@ function judgePeek(
   text: string
 ): ClassifyResult | null {
   for (const payload of payloadsOf(contentType, text)) {
+    // Only an event that ends the request can be judged. A notification in front
+    // of the real answer says nothing about the outcome, and reading further must
+    // never invent one.
+    if (!isConclusion(payload)) continue;
     const verdict = classifyMcpResult(payload, service.quota);
     if (verdict) return verdict;
   }
@@ -501,8 +567,11 @@ export async function forwardMCP(
     if (verdict && !pinnedKeyId && shouldReplay(verdict, { retryOn5xx: service.retryOn5xx, toolSafe })) {
       verdicts.push(verdict);
       await pool.report(picked.keyId, verdict, service.quota);
+      // A read left in flight by the peek still has to settle, or its rejection
+      // would surface as an unhandled one.
+      peek.pending?.catch(() => undefined);
       await reader.cancel().catch(() => undefined);
-      lastResponse = new Response(peek.text, {
+      lastResponse = new Response(concatBytes(peek.buffered), {
         status: upstream.status,
         headers: responseHeaders(upstream),
       });
@@ -547,7 +616,7 @@ export async function forwardMCP(
       }
     }
 
-    const stream = replayThenStream(peek.buffered, reader);
+    const stream = replayThenStream(peek.buffered, reader, peek.pending);
 
     return {
       response: new Response(stream, {
