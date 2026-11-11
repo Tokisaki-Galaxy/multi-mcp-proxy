@@ -61,7 +61,9 @@ test("sample 1: Firecrawl dead key wrapped in HTTP 200", () => {
 
   const result = found(classifyMcpResult(JSON.parse(FIRECRAWL_INVALID_KEY), firecrawlRules));
   assert.equal(result.verdict, "invalid");
-  assert.equal(result.requestNotProcessed, true);
+  // Reported inside the body, so the tool may already have run. Not replayable
+  // on that evidence alone.
+  assert.equal(result.requestNotProcessed, false);
 });
 
 test("sample 2: Exa dead key wrapped in HTTP 200, status parsed from prose", () => {
@@ -155,7 +157,7 @@ test("an isError result that matches no rule is a client error", () => {
   };
   const result = found(classifyMcpResult(payload, exaRules));
   assert.equal(result.verdict, "client");
-  assert.equal(result.requestNotProcessed, true);
+  assert.equal(result.requestNotProcessed, false);
 });
 
 test("explicit rules win over the status defaults", () => {
@@ -177,7 +179,7 @@ test("quota wording in an error envelope marks the key exhausted", () => {
   };
   const result = found(classifyMcpResult(payload, exaRules));
   assert.equal(result.verdict, "exhausted");
-  assert.equal(result.requestNotProcessed, true);
+  assert.equal(result.requestNotProcessed, false);
 });
 
 test("a successful result that merely mentions credits stays clean", () => {

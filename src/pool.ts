@@ -27,6 +27,7 @@ import {
   SCHEMA_TABLE,
   SCHEMA_TASK_INDEX,
   SCHEMA_TASK_TABLE,
+  SCHEMA_TOOL_TABLE,
   bumpErrorCount,
   buildProbeRequest,
   compareCandidates,
@@ -41,9 +42,11 @@ import {
   readProbeValues,
   shareOf,
   summariseError,
+  TOOL_FLAG_MAX,
   toRecord,
   type KeyRow,
   type RankInput,
+  type ToolFlag,
 } from "./pool-logic";
 
 export interface PoolEnv {
@@ -81,6 +84,7 @@ export class KeyPool extends DurableObject<PoolEnv> {
         this.sql.exec(SCHEMA_INDEX);
         this.sql.exec(SCHEMA_TASK_TABLE);
         this.sql.exec(SCHEMA_TASK_INDEX);
+        this.sql.exec(SCHEMA_TOOL_TABLE);
       })();
     }
     return this.schema;
@@ -383,6 +387,65 @@ export class KeyPool extends DurableObject<PoolEnv> {
       .exec("SELECT COUNT(*) AS n FROM task_affinity WHERE expires_at <= ?", now)
       .one() as { n: number };
     return { live: live?.n ?? 0, expired: expired?.n ?? 0 };
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Tool annotations                                                       */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Store the annotations published by a `tools/list` response.
+   *
+   * Every listed tool overwrites its previous row, so a hint that is removed or
+   * downgraded takes effect on the next list. A tool that vanishes from the list
+   * keeps its last row: with cursor pagination no single response proves the list
+   * is complete, and dropping rows on the last page would erase the earlier
+   * ones. A call that still names a vanished tool therefore reads that old row,
+   * which is why a renamed and repurposed tool must be listed again before its
+   * safety is trusted.
+   */
+  async recordToolFlags(flags: ToolFlag[]): Promise<number> {
+    await this.ensureSchema();
+    if (!Array.isArray(flags) || flags.length === 0) return 0;
+
+    const now = this.now();
+    let written = 0;
+    for (const flag of flags.slice(0, TOOL_FLAG_MAX)) {
+      const name = String(flag?.name ?? "");
+      if (!name) continue;
+      this.sql.exec(
+        `INSERT INTO tool_flags (name, read_only, idempotent, seen_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(name) DO UPDATE SET
+           read_only = excluded.read_only,
+           idempotent = excluded.idempotent,
+           seen_at = excluded.seen_at`,
+        name,
+        flag.readOnly === true ? 1 : 0,
+        flag.idempotent === true ? 1 : 0,
+        now
+      );
+      written += 1;
+    }
+    return written;
+  }
+
+  /**
+   * Whether repeating a call to this tool cannot double an effect.
+   *
+   * Unknown tools answer false. The specification defaults both hints to false,
+   * so absence is treated exactly like a tool that declared nothing.
+   */
+  async isToolSafe(name: string): Promise<boolean> {
+    await this.ensureSchema();
+    const key = String(name ?? "");
+    if (!key) return false;
+
+    const rows = this.sql
+      .exec("SELECT read_only, idempotent FROM tool_flags WHERE name = ?", key)
+      .toArray() as { read_only: number; idempotent: number }[];
+    if (rows.length === 0) return false;
+    const row = rows[0]!;
+    return row.read_only === 1 || row.idempotent === 1;
   }
 
   async report(keyId: string, result: ClassifyResult, rules: QuotaRules): Promise<void> {

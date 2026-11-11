@@ -194,7 +194,8 @@ function assemble(
   status: number | undefined,
   code: string | undefined,
   message: string,
-  retryAfterMs: number | undefined
+  retryAfterMs: number | undefined,
+  notProcessed: boolean
 ): ClassifyResult {
   return {
     verdict,
@@ -202,19 +203,24 @@ function assemble(
     ...(code !== undefined ? { code } : {}),
     message,
     ...(verdict === "cooldown" ? { retryAfterMs: retryAfterMs ?? DEFAULT_COOLDOWN_MS } : {}),
-    // A rejected request, a dead key or an empty balance means no tool ever ran.
-    requestNotProcessed: verdict !== "server" && verdict !== "network",
+    requestNotProcessed: notProcessed,
   };
 }
 
-/** Derives the missing half of a finding, then applies the service rules. */
+/**
+ * Derives the missing half of a finding, then applies the service rules.
+ *
+ * Always marked as possibly-processed. This path reads a failure reported
+ * inside the response body, and that failure can arrive after the tool has
+ * already done part of its work, so it never justifies a replay on its own.
+ */
 function resolve(finding: Finding, rules: QuotaRules): ClassifyResult {
   const raw = finding.message;
   const message = clip(raw) || "Upstream returned an error";
   const code = finding.code ?? tagOfText(raw);
   const status = finding.status ?? statusFromText(raw) ?? (code !== undefined ? TAG_STATUS[code] : undefined);
   const verdict = decide(status, message, code, rules);
-  return assemble(verdict, status, code, message, finding.retryAfterMs);
+  return assemble(verdict, status, code, message, finding.retryAfterMs, false);
 }
 
 /** True when a parsed JSON body declares itself a failure rather than a result. */
@@ -282,14 +288,16 @@ export function classifyHttp(
   const detail = body.message === "" ? "" : `: ${body.message}`;
   const code = body.code;
 
+  // A 4xx at the status line is a rejection at the transport edge: the request
+  // never reached the tool, so a different key may safely be tried.
   if (rules.invalidStatuses.includes(status)) {
-    return assemble("invalid", status, code, `HTTP ${status}${detail}`, undefined);
+    return assemble("invalid", status, code, `HTTP ${status}${detail}`, undefined, true);
   }
   if (rules.exhaustedStatuses.includes(status)) {
-    return assemble("exhausted", status, code, `HTTP ${status}${detail}`, undefined);
+    return assemble("exhausted", status, code, `HTTP ${status}${detail}`, undefined, true);
   }
   if (rules.cooldownStatuses.includes(status)) {
-    return assemble("cooldown", status, code, `HTTP ${status}${detail}`, parseRetryAfter(headers));
+    return assemble("cooldown", status, code, `HTTP ${status}${detail}`, parseRetryAfter(headers), true);
   }
   if (status >= 500) {
     // Replaying a tool call after a 5xx is only safe when the service opts in.
@@ -302,7 +310,7 @@ export function classifyHttp(
     };
   }
   if (status >= 400) {
-    return assemble("client", status, code, `HTTP ${status}${detail}`, undefined);
+    return assemble("client", status, code, `HTTP ${status}${detail}`, undefined, true);
   }
   // Some upstreams wrap a quota error in a 200; the body still has to be read.
   return { verdict: "ok", status, message: `HTTP ${status}`, requestNotProcessed: false };
@@ -335,7 +343,8 @@ export function classifyMcpResult(result: unknown, rules: QuotaRules): ClassifyR
       429,
       "RATE_LIMIT_EXCEEDED",
       "Upstream marked the response as rate limited",
-      DEFAULT_COOLDOWN_MS
+      DEFAULT_COOLDOWN_MS,
+      false
     );
   }
 

@@ -102,8 +102,10 @@ export interface ClassifyResult {
   /** Milliseconds to wait before this key is usable again. */
   retryAfterMs?: number;
   /**
-   * True when the upstream made clear it did not start work for this request.
-   * Only then is replaying a non-idempotent tool call safe.
+   * True when the failure arrived at the transport layer, so the tool never
+   * started: a configured 4xx on the status line, or a 5xx on a service that
+   * opted into `retryOn5xx`. A failure carried inside an HTTP 200 body always
+   * leaves this false, because the tool may already have run.
    */
   requestNotProcessed: boolean;
 }

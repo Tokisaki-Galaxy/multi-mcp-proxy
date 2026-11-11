@@ -415,6 +415,109 @@ export function collectResultIds(payload: unknown, fields: string[]): string[] {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Replay safety.                                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What the caller knows about repeating this one request.
+ *
+ * The proxy sits below the application and cannot tell from a failure alone
+ * whether the tool had side effects. Two independent facts decide:
+ *
+ *   - `requestNotProcessed` on the verdict says the failure was reported at the
+ *     transport layer, before the tool could start. A failure reported inside an
+ *     HTTP 200 body may follow a partial execution, so that path never sets it.
+ *     A 5xx sets it only when the service claims its 5xx are pre-execution.
+ *   - `toolSafe` says repeating the call cannot double an effect. It comes from
+ *     the tool's own annotations, or from a method that is read-only by
+ *     definition.
+ */
+export interface ReplayPolicy {
+  /** Whether the service allows a retry after a 5xx. */
+  retryOn5xx: boolean;
+  /** True when repeating this exact call cannot double an effect. */
+  toolSafe: boolean;
+}
+
+/**
+ * Decide whether a second upstream attempt is allowed.
+ *
+ * The default answer is no. A body-level failure needs a tool that declares
+ * itself safe, because `result.isError` only reports that execution failed, not
+ * that nothing ran. Cancelling the response stream does not undo an upstream
+ * job, so a wrong replay here becomes a duplicate charge.
+ */
+export function shouldReplay(verdict: ClassifyResult, policy: ReplayPolicy): boolean {
+  if (verdict.verdict === "server") return policy.retryOn5xx && verdict.requestNotProcessed;
+
+  const retryable =
+    verdict.verdict === "invalid" ||
+    verdict.verdict === "exhausted" ||
+    verdict.verdict === "cooldown";
+  if (!retryable) return false;
+
+  return verdict.requestNotProcessed || policy.toolSafe;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Tool annotations.                                                           */
+/* -------------------------------------------------------------------------- */
+
+/** Cap on tools remembered from one list response. */
+export const TOOL_FLAG_MAX = 256;
+
+/** The two annotations that make a repeated call harmless. */
+export interface ToolFlag {
+  name: string;
+  readOnly: boolean;
+  idempotent: boolean;
+}
+
+/**
+ * Read the replay-relevant annotations out of a `tools/list` result.
+ *
+ * Both hints default to false in the specification, and a tool missing from the
+ * stored list is treated as unsafe, so a server that publishes nothing gets no
+ * replay at all. `destructiveHint` and `openWorldHint` describe risk rather than
+ * repeatability and are deliberately not consulted.
+ *
+ * One response is one page. A paginating server returns a cursor with each page,
+ * so each page that passes through is recorded on its own; a tool the client
+ * never lists stays unknown, and unknown means unsafe.
+ */
+export function collectToolFlags(payload: unknown, limit = TOOL_FLAG_MAX): ToolFlag[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const envelope = payload as Record<string, unknown>;
+  const result = envelope.result;
+  if (!result || typeof result !== "object" || Array.isArray(result)) return [];
+
+  const list = (result as Record<string, unknown>).tools;
+  if (!Array.isArray(list)) return [];
+
+  const out: ToolFlag[] = [];
+  for (const item of list) {
+    if (out.length >= limit) break;
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const tool = item as Record<string, unknown>;
+    const name = tool.name;
+    if (typeof name !== "string" || name.length === 0 || name.length > 128) continue;
+
+    const annotations = tool.annotations;
+    const flags =
+      annotations && typeof annotations === "object" && !Array.isArray(annotations)
+        ? (annotations as Record<string, unknown>)
+        : {};
+
+    out.push({
+      name,
+      readOnly: flags.readOnlyHint === true,
+      idempotent: flags.idempotentHint === true,
+    });
+  }
+  return out;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Storage plumbing.                                                           */
 /* -------------------------------------------------------------------------- */
 
@@ -474,6 +577,21 @@ CREATE TABLE IF NOT EXISTS task_affinity (
 )`;
 
 export const SCHEMA_TASK_INDEX = "CREATE INDEX IF NOT EXISTS task_expiry_idx ON task_affinity (expires_at)";
+
+/**
+ * What the upstream said about each tool's replay safety.
+ *
+ * Written when a `tools/list` response passes through, read before a
+ * `tools/call` is allowed to retry. Rows are overwritten on the next list, so a
+ * server that changes an annotation takes effect without any manual reset.
+ */
+export const SCHEMA_TOOL_TABLE = `
+CREATE TABLE IF NOT EXISTS tool_flags (
+  name TEXT PRIMARY KEY,
+  read_only INTEGER NOT NULL DEFAULT 0,
+  idempotent INTEGER NOT NULL DEFAULT 0,
+  seen_at INTEGER NOT NULL
+)`;
 
 export function normaliseWeight(weight: number | undefined, fallback: number): number {
   if (weight === undefined || weight === null || !Number.isFinite(weight)) return fallback;

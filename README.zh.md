@@ -13,7 +13,7 @@
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-000000?style=flat-square)](https://modelcontextprotocol.io/)
 
 [![免费版可跑](https://img.shields.io/badge/runs%20on-Workers%20Free-f0a020?style=flat-square)](https://developers.cloudflare.com/workers/platform/limits/)
-[![测试](https://img.shields.io/badge/tests-130%20passing-2ea44f?style=flat-square)](#开发)
+[![测试](https://img.shields.io/badge/tests-175%20passing-2ea44f?style=flat-square)](#开发)
 [![多语言](https://img.shields.io/badge/panel%20languages-5-6d5cff?style=flat-square)](#界面语言)
 [![许可](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
@@ -34,7 +34,7 @@ data: {"result":{"content":[{"type":"text","text":"The Firecrawl API key is inva
 
 状态码是 200，纯 header 层的反代看不到任何异常。结果就是一把密钥失效后，所有请求都会继续打在它上面，客户端拿到的是错误文本，代理毫不知情。
 
-这个项目在响应流上做一次首事件窥探。判定为失败就丢弃这次响应，换一把密钥重放同一份请求体。判定正常就把已读字节补发回去，剩下的流原样转发。
+这个项目在响应流上做一次首事件窥探。判定为失败就丢弃这次响应，确认失败发生在上游开工之前时，换一把密钥重放同一份请求体。判定正常就把已读字节补发回去，剩下的流原样转发。
 
 ## 实测依据
 
@@ -159,8 +159,10 @@ https://你的域名/服务ID/mcp
 
 重放的安全边界：
 
-- 鉴权失效、额度耗尽、限流会重放。这三类都意味着上游在扣费之前就拒绝了。
-- 5xx 和网络错误默认不重放，因为无法确认上游是否已经开始工作。只有服务配置里显式打开 `retryOn5xx`，且判定认为请求未被处理时才重放。
+- HTTP 状态行上的鉴权失效、额度耗尽、限流会重放。这一类是传输层直接拒绝，上游没有开工，也没有扣费。
+- 同样的失败包在 HTTP 200 body 里时，只有确认可以重复的请求才重放：本身不可能有副作用的协议方法，或者声明了 `readOnlyHint`、`idempotentHint` 的工具。body 里的失败只说明执行失败，不能说明没执行过；取消响应流也不会撤销上游已经在跑的任务。
+- 工具注解从代理本来就要转发的 `tools/list` 响应里取，客户端先列工具再调用就能覆盖，不额外发请求。代理没见过的工具，或者列出来但没带注解的工具，一律按不安全处理。
+- 5xx 和网络错误默认不重放，因为无法确认上游是否已经开始工作。只有服务配置里显式打开 `retryOn5xx` 才重放。
 - 非幂等工具比如研究任务，一旦拿到任务 ID 就不再重放。
 
 ## 已知限制
@@ -181,7 +183,7 @@ pnpm e2e          # 打真实 Exa 端点，验证换 key 重放
 pnpm check:ui     # 检查面板内联脚本语法
 ```
 
-测试直接用 Node 自带的运行器，不需要额外装 vitest。`pnpm test` 会跑 130 个用例，其中集成测试会在 Miniflare 里拉起真实的 KV 和 SQLite Durable Object，并覆盖语言协商、cookie 优先级和目录完整性。
+测试直接用 Node 自带的运行器，不需要额外装 vitest。`pnpm test` 会跑 175 个用例，其中集成测试会在 Miniflare 里拉起真实的 KV 和 SQLite Durable Object，并覆盖语言协商、cookie 优先级和目录完整性。
 
 判定逻辑在 `src/classify.ts`，转发与重放在 `src/forward.ts`，密钥池在 `src/pool.ts`。
 
