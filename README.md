@@ -13,7 +13,7 @@ Point a request at a service, and it goes to the upstream MCP endpoint byte for 
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-000000?style=flat-square)](https://modelcontextprotocol.io/)
 
 [![Free plan](https://img.shields.io/badge/runs%20on-Workers%20Free-f0a020?style=flat-square)](https://developers.cloudflare.com/workers/platform/limits/)
-[![Tests](https://img.shields.io/badge/tests-130%20passing-2ea44f?style=flat-square)](#development)
+[![Tests](https://img.shields.io/badge/tests-175%20passing-2ea44f?style=flat-square)](#development)
 [![i18n](https://img.shields.io/badge/panel%20languages-5-6d5cff?style=flat-square)](#interface-languages)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
@@ -34,7 +34,7 @@ data: {"result":{"content":[{"type":"text","text":"The Firecrawl API key is inva
 
 The status code is 200. A proxy that only looks at headers sees nothing wrong. So a dead key keeps receiving traffic forever, the client gets error text, and the proxy has no idea.
 
-This project peeks at the first SSE event on the response stream. If it is a failure, the proxy discards the response, picks another key and replays the same request body. If it is fine, the bytes already read are flushed back out and the rest streams through untouched.
+This project peeks at the first SSE event on the response stream. If it is a failure, the proxy discards the response and, when the failure proves nothing ran, picks another key and replays the same request body. If it is fine, the bytes already read are flushed back out and the rest streams through untouched.
 
 ## Measured, not assumed
 
@@ -159,8 +159,10 @@ Three layers, always in this order:
 
 Replay is bounded by what the upstream actually told us:
 
-- Auth failures, quota exhaustion and rate limits are replayed. All three mean the upstream refused before doing any billable work.
-- 5xx and network errors are not replayed by default, because nothing proves the upstream did not start. A service can opt in with `retryOn5xx`, and even then replay only happens when the verdict says the request was not processed.
+- An auth, quota or rate-limit status on the HTTP status line is replayed. The transport refused the request, so nothing ran and nothing was billed.
+- The same failure wrapped in an HTTP 200 body only replays for a request that is safe to repeat: a protocol method that cannot have side effects, or a tool that declared `readOnlyHint` or `idempotentHint`. The body reports that execution failed, not that nothing ran, and cancelling the response stream does not undo an upstream job.
+- Annotations are picked up from the `tools/list` responses the proxy already forwards, so a client that lists tools before calling them is covered, and no extra upstream call is spent. A tool the proxy has never seen, or one listed without annotations, is treated as unsafe.
+- 5xx and network errors are not replayed by default, because nothing proves the upstream did not start. A service can opt in with `retryOn5xx`.
 - Non-idempotent tools such as research jobs stop being replayable once a job id comes back.
 
 ## Known limits
@@ -181,7 +183,7 @@ pnpm e2e          # hit a real Exa endpoint to verify key rotation
 pnpm check:ui     # syntax check the panel's inline scripts
 ```
 
-Tests run on Node's built in runner, so vitest is not needed. `pnpm test` covers 130 cases. The integration suite boots Miniflare with a real KV binding and a SQLite Durable Object, and also checks locale negotiation, cookie precedence and catalog completeness.
+Tests run on Node's built in runner, so vitest is not needed. `pnpm test` covers 175 cases. The integration suite boots Miniflare with a real KV binding and a SQLite Durable Object, and also checks locale negotiation, cookie precedence and catalog completeness.
 
 Classification lives in `src/classify.ts`, forwarding and replay in `src/forward.ts`, the key pool in `src/pool.ts`.
 

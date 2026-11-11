@@ -527,6 +527,83 @@ test("replays a body-level failure for a tool that declared itself read-only", a
   assert.notEqual(seen[0]!.apiKey, seen[1]!.apiKey, "replay reused the same key");
 });
 
+test("a downgraded annotation closes the replay path again", async () => {
+  // The same tool is listed twice. The second list drops the hint, so the stored
+  // row has to be overwritten rather than merged, or the old yes would survive.
+  script = () =>
+    sse({
+      jsonrpc: "2.0",
+      id: 1,
+      result: { tools: [{ name: "reader", inputSchema: { type: "object" } }] },
+    });
+  seen.length = 0;
+  await fetch(base + "/svc/mcp", {
+    method: "POST",
+    headers: { "x-proxy-key": PROXY_KEY, "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+  });
+
+  script = () =>
+    sse({
+      result: { content: [{ type: "text", text: "rate limit exceeded" }], isError: true },
+      jsonrpc: "2.0",
+      id: 9,
+    });
+  seen.length = 0;
+
+  const res = await fetch(base + "/svc/mcp", {
+    method: "POST",
+    headers: {
+      "x-proxy-key": PROXY_KEY,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "reader", arguments: {} } }),
+  });
+
+  const text = await res.text();
+  assert.equal(res.status, 200);
+  assert.match(text, /rate limit exceeded/);
+  assert.equal(res.headers.get("x-proxy-attempts"), "1", "the dropped hint was not applied");
+  assert.equal(seen.length, 1, "a tool that no longer declares itself safe must not replay");
+});
+
+test("replays a read-only protocol method that cannot carry an annotation", async () => {
+  // resources/read has no tools/list entry, so the method whitelist is the only
+  // thing that can make it replayable.
+  await api("/api/services/svc/keys", { keys: "key-res-read-1\nkey-res-read-2" });
+
+  script = (n) =>
+    n === 0
+      ? sse({
+          result: { content: [{ type: "text", text: "rate limit exceeded" }], isError: true },
+          jsonrpc: "2.0",
+          id: 4,
+        })
+      : sse({
+          jsonrpc: "2.0",
+          id: 4,
+          result: { contents: [{ uri: "file:///a.txt", text: "real resource body" }] },
+        });
+  seen.length = 0;
+
+  const res = await fetch(base + "/svc/mcp", {
+    method: "POST",
+    headers: {
+      "x-proxy-key": PROXY_KEY,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "resources/read", params: { uri: "file:///a.txt" } }),
+  });
+
+  const text = await res.text();
+  assert.equal(res.status, 200);
+  assert.match(text, /real resource body/);
+  assert.equal(seen.length, 2, "a read-only protocol method should be replayed");
+  assert.notEqual(seen[0]!.apiKey, seen[1]!.apiKey, "replay reused the same key");
+});
+
 test("widens a narrow Accept header for strict upstreams", async () => {
   script = () => sse({ jsonrpc: "2.0", id: 1, result: {} });
   seen.length = 0;

@@ -424,12 +424,12 @@ export function collectResultIds(payload: unknown, fields: string[]): string[] {
  * The proxy sits below the application and cannot tell from a failure alone
  * whether the tool had side effects. Two independent facts decide:
  *
- *   - `requestNotProcessed` on the verdict says the upstream rejected the
- *     request before it started work. Only the transport layer can promise
- *     this. A failure reported inside an HTTP 200 body may follow a partial
- *     execution.
+ *   - `requestNotProcessed` on the verdict says the failure was reported at the
+ *     transport layer, before the tool could start. A failure reported inside an
+ *     HTTP 200 body may follow a partial execution, so that path never sets it.
+ *     A 5xx sets it only when the service claims its 5xx are pre-execution.
  *   - `toolSafe` says repeating the call cannot double an effect. It comes from
- *     the tool's own annotations, or from a method that is idempotent by
+ *     the tool's own annotations, or from a method that is read-only by
  *     definition.
  */
 export interface ReplayPolicy {
@@ -481,8 +481,9 @@ export interface ToolFlag {
  * replay at all. `destructiveHint` and `openWorldHint` describe risk rather than
  * repeatability and are deliberately not consulted.
  *
- * Only the first page is read. A server paginating its tool list therefore keeps
- * the tools on later pages permanently unsafe, which is the conservative side.
+ * One response is one page. A paginating server returns a cursor with each page,
+ * so each page that passes through is recorded on its own; a tool the client
+ * never lists stays unknown, and unknown means unsafe.
  */
 export function collectToolFlags(payload: unknown, limit = TOOL_FLAG_MAX): ToolFlag[] {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];

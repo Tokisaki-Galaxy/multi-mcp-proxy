@@ -396,9 +396,13 @@ export class KeyPool extends DurableObject<PoolEnv> {
   /**
    * Store the annotations published by a `tools/list` response.
    *
-   * Rewriting rather than merging matters: a server that removes or downgrades
-   * a hint takes effect on the next list. A tool that disappears keeps its stale
-   * row and is simply never looked up again.
+   * Every listed tool overwrites its previous row, so a hint that is removed or
+   * downgraded takes effect on the next list. A tool that vanishes from the list
+   * keeps its last row: with cursor pagination no single response proves the list
+   * is complete, and dropping rows on the last page would erase the earlier
+   * ones. A call that still names a vanished tool therefore reads that old row,
+   * which is why a renamed and repurposed tool must be listed again before its
+   * safety is trusted.
    */
   async recordToolFlags(flags: ToolFlag[]): Promise<number> {
     await this.ensureSchema();

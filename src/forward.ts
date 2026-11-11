@@ -318,6 +318,10 @@ function affinityError(jsonrpcId: unknown, message: string, reason: string): Res
  * `tools/call` is deliberately absent. It is the one request whose entire
  * purpose may be a side effect, so it needs the tool itself to declare that
  * repeating it is harmless.
+ *
+ * `resources/read` and `prompts/get` are here because they are read-only by
+ * definition too, and neither can carry tool annotations, so leaving them out
+ * would stop key rotation for them with no safety gained.
  */
 const IDEMPOTENT_METHODS = new Set([
   "initialize",
@@ -325,7 +329,9 @@ const IDEMPOTENT_METHODS = new Set([
   "tools/list",
   "resources/list",
   "resources/templates/list",
+  "resources/read",
   "prompts/list",
+  "prompts/get",
   "completion/complete",
 ]);
 

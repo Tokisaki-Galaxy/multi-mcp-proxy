@@ -4,7 +4,10 @@
  * Uses Exa because it answers without a valid key at a lower rate limit, so
  * the whole chain can be exercised without spending anyone's quota. Two fake
  * keys are loaded ahead of it; the first one must be retired and the request
- * replayed onto the second.
+ * replayed onto the second. The replayed request is `initialize`, a protocol
+ * method. A `tools/call` is only replayed for a tool the server annotated as
+ * read-only or idempotent, and step 4 shows the default: no tool list was
+ * fetched, so the call is not replayed.
  *
  * Run: node scripts/e2e-exa.mjs
  */
@@ -74,7 +77,7 @@ res = await call("/api/services/exa/keys", {
 });
 console.log("   ", res.status, await res.text());
 
-console.log("3. 走代理执行 initialize");
+console.log("3. 走代理执行 initialize（协议方法，假 key 应被淘汰并重放）");
 res = await fetch(base + "/exa/mcp", {
   method: "POST",
   headers: {
@@ -92,7 +95,7 @@ const initText = await res.text();
 console.log("   body", initText.slice(0, 200).replace(/\n/g, " | "));
 const sessionId = res.headers.get("mcp-session-id");
 
-console.log("4. 走代理执行 tools/call（假 key 应被淘汰并重放）");
+console.log("4. 走代理执行 tools/call（仅当上游给该工具标了只读或幂等才会重放）");
 res = await fetch(base + "/exa/mcp", {
   method: "POST",
   headers: {
