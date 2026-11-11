@@ -38,7 +38,17 @@ interface ScriptedReply {
   status: number;
   headers: Record<string, string>;
   body: string;
+  /**
+   * Written one piece at a time, with a gap between pieces, so the proxy really
+   * receives them in separate reads. A single `end(body)` puts everything in one
+   * chunk and lets a peek that stops too early still find the outcome further
+   * down the same buffer, which hides the bug these frames exist to catch.
+   */
+  frames?: string[];
 }
+
+/** Gap between streamed frames. Long enough that a stopping peek returns first. */
+const FRAME_GAP_MS = 120;
 
 let mf: any;
 let upstream: Server;
@@ -88,7 +98,23 @@ before(async () => {
       });
       const reply = script(seen.length - 1);
       res.writeHead(reply.status, reply.headers);
-      res.end(reply.body);
+      if (!reply.frames) {
+        res.end(reply.body);
+        return;
+      }
+      const frames = reply.frames;
+      let next = 0;
+      const writeNext = () => {
+        if (res.writableEnded || res.destroyed) return;
+        if (next >= frames.length) {
+          res.end();
+          return;
+        }
+        res.write(frames[next]);
+        next += 1;
+        setTimeout(writeNext, FRAME_GAP_MS);
+      };
+      writeNext();
     });
   });
 
@@ -902,10 +928,23 @@ test("rejects affinity with no fields", async () => {
 
 /* ------------------------------------------------------- progress peeking */
 
-/** A slow tool that emits one progress notification before its real outcome. */
-const PROGRESS_THEN_ERROR =
-  'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"t","progress":1,"total":3}}\n\n' +
+/**
+ * A slow tool, frame by frame.
+ *
+ * The upstream writes one frame, waits, writes the next. A peek that stops at the
+ * first complete event only ever sees the first frame here, which is what makes
+ * these two tests fail against the old stop-at-first-event rule.
+ */
+const PROGRESS_FRAME =
+  'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"t","progress":1,"total":3}}\n\n';
+const PROGRESS_TAIL_FRAME =
+  'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"t","progress":2,"total":3}}\n\n';
+const RATE_LIMIT_FRAME =
   'event: message\ndata: {"jsonrpc":"2.0","id":9,"result":{"content":[{"type":"text","text":"rate limit exceeded"}],"isError":true}}\n\n';
+
+function streamed(frames: string[]): ScriptedReply {
+  return { status: 200, headers: { "content-type": "text/event-stream" }, body: "", frames };
+}
 
 test("skips a progress notification and judges the error behind it", async () => {
   const save = await api("/api/services", {
@@ -936,7 +975,7 @@ test("skips a progress notification and judges the error behind it", async () =>
 
   script = (n) =>
     n === 0
-      ? { status: 200, headers: { "content-type": "text/event-stream" }, body: PROGRESS_THEN_ERROR }
+      ? streamed([PROGRESS_FRAME, RATE_LIMIT_FRAME])
       : sse({ jsonrpc: "2.0", id: 9, result: { content: [{ type: "text", text: "real answer" }] } });
 
   seen.length = 0;
@@ -959,7 +998,7 @@ test("skips a progress notification and judges the error behind it", async () =>
   await api("/api/services/peektool", undefined, "DELETE");
 });
 
-test("marks the key on an error behind a progress frame without replaying", async () => {
+test("marks the key on an error behind several progress frames without replaying", async () => {
   const save = await api("/api/services", {
     id: "peekmark",
     name: "Peek mark",
@@ -969,7 +1008,7 @@ test("marks the key on an error behind a progress frame without replaying", asyn
   assert.equal(save.status, 200);
   await api("/api/services/peekmark/keys", { keys: "peekmark-one\npeekmark-two" });
 
-  script = () => ({ status: 200, headers: { "content-type": "text/event-stream" }, body: PROGRESS_THEN_ERROR });
+  script = () => streamed([PROGRESS_FRAME, PROGRESS_TAIL_FRAME, RATE_LIMIT_FRAME]);
 
   seen.length = 0;
   const before = (await (await api("/api/services/peekmark/keys")).json()) as any;
@@ -994,6 +1033,17 @@ test("marks the key on an error behind a progress frame without replaying", asyn
   const text = await res.text();
   assert.equal(res.status, 200);
   assert.match(text, /rate limit exceeded/, "the client should see the real error");
+  // Every byte the peek swallowed has to come back out, in order and exactly
+  // once, or the client loses frames the proxy merely borrowed.
+  assert.equal(
+    (text.match(/notifications\/progress/g) ?? []).length,
+    2,
+    "a buffered progress frame was dropped or duplicated"
+  );
+  assert.ok(
+    text.indexOf("rate limit exceeded") > text.lastIndexOf("notifications/progress"),
+    "frames were reordered on the way out"
+  );
   assert.equal(seen.length, 1, "an unannotated tool must not be replayed");
 
   const after = (await (await api("/api/services/peekmark/keys")).json()) as any;
@@ -1002,4 +1052,43 @@ test("marks the key on an error behind a progress frame without replaying", asyn
   assert.equal(coolingAfter, coolingBefore + 1, "the key was recorded as healthy despite the error");
 
   await api("/api/services/peekmark", undefined, "DELETE");
+});
+
+test("a stream with no conclusion still reaches the client whole", async () => {
+  const save = await api("/api/services", {
+    id: "peeksilent",
+    name: "Peek silent",
+    upstreamUrl,
+    auth: { type: "header", name: "x-api-key" },
+  });
+  assert.equal(save.status, 200);
+  await api("/api/services/peeksilent/keys", { keys: "silent-one\nsilent-two" });
+
+  // Notifications only: nothing in this response ever says how the call ended, so
+  // the peek runs to the end of the stream and must pass every frame through
+  // untouched instead of inventing a verdict.
+  script = () => streamed([PROGRESS_FRAME, PROGRESS_TAIL_FRAME, PROGRESS_FRAME]);
+
+  seen.length = 0;
+  const res = await fetch(`${base}/peeksilent/mcp`, {
+    method: "POST",
+    headers: {
+      "x-proxy-key": PROXY_KEY,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 9,
+      method: "tools/call",
+      params: { name: "chatty", arguments: {} },
+    }),
+  });
+
+  const text = await res.text();
+  assert.equal(res.status, 200);
+  assert.equal((text.match(/notifications\/progress/g) ?? []).length, 3, "frames were lost on the way out");
+  assert.equal(seen.length, 1, "an unjudged stream must not be replayed");
+
+  await api("/api/services/peeksilent", undefined, "DELETE");
 });
