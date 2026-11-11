@@ -16,6 +16,7 @@
 
 import type { ClassifyResult, QuotaRules, SelectResult, ServiceConfig } from "./types";
 import { classifyHttp, classifyMcpResult } from "./classify";
+import { hasConclusion, ssePayloads } from "./peek";
 import {
   collectCandidateIds,
   collectResultIds,
@@ -132,15 +133,19 @@ interface PeekResult {
   buffered: Uint8Array[];
   /** Decoded prefix, for classification. */
   text: string;
-  /** True when a whole SSE event was captured. */
+  /** True when an event carrying a result or an error was captured. */
   complete: boolean;
 }
 
 /**
  * Read just enough of the upstream body to judge it.
  *
- * SSE: stop at the first complete event. A synchronous tool answers with a
- * single event, so this is normally the whole response.
+ * SSE: stop at the first event that concludes the request, meaning one with a
+ * `result` or an `error`. A slow tool emits progress notifications first, and
+ * stopping on one of those would look healthy while the real error waited behind
+ * it. A synchronous tool answers with a single event, so this is normally the
+ * whole response.
+ *
  * JSON: read to the end, because a truncated object cannot be parsed. These
  * responses are single MCP results and are small in practice.
  */
@@ -166,7 +171,7 @@ async function peekFirstEvent(
     buffered.push(value);
     bytes += value.byteLength;
     text += decoder.decode(value, { stream: true });
-    if (!isJson && text.includes("\n\n")) {
+    if (!isJson && hasConclusion(text)) {
       return { peek: { buffered, text, complete: true }, reader };
     }
   }
@@ -196,23 +201,6 @@ function replayThenStream(
       return reader.cancel(reason);
     },
   });
-}
-
-/** Pull the JSON-RPC object out of an SSE `data:` line. */
-function ssePayloads(text: string): unknown[] {
-  const out: unknown[] = [];
-  for (const line of text.split("\n")) {
-    const trimmed = line.trimStart();
-    if (!trimmed.startsWith("data:")) continue;
-    const json = trimmed.slice(5).trim();
-    if (!json) continue;
-    try {
-      out.push(JSON.parse(json));
-    } catch {
-      // Partial or non-JSON event, ignore.
-    }
-  }
-  return out;
 }
 
 /**

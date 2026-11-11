@@ -899,3 +899,107 @@ test("rejects affinity with no fields", async () => {
   });
   assert.equal(res.status, 400);
 });
+
+/* ------------------------------------------------------- progress peeking */
+
+/** A slow tool that emits one progress notification before its real outcome. */
+const PROGRESS_THEN_ERROR =
+  'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"t","progress":1,"total":3}}\n\n' +
+  'event: message\ndata: {"jsonrpc":"2.0","id":9,"result":{"content":[{"type":"text","text":"rate limit exceeded"}],"isError":true}}\n\n';
+
+test("skips a progress notification and judges the error behind it", async () => {
+  const save = await api("/api/services", {
+    id: "peektool",
+    name: "Peek",
+    upstreamUrl,
+    auth: { type: "header", name: "x-api-key" },
+  });
+  assert.equal(save.status, 200);
+  await api("/api/services/peektool/keys", { keys: "peek-key-one\npeek-key-two" });
+
+  // Declare the tool read-only so the error behind the progress frame is allowed
+  // to replay. Without the annotation the assertion below would pass for the
+  // wrong reason.
+  script = () =>
+    sse({
+      jsonrpc: "2.0",
+      id: 1,
+      result: {
+        tools: [{ name: "slow", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } }],
+      },
+    });
+  await fetch(base + "/peektool/mcp", {
+    method: "POST",
+    headers: { "x-proxy-key": PROXY_KEY, "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+  });
+
+  script = (n) =>
+    n === 0
+      ? { status: 200, headers: { "content-type": "text/event-stream" }, body: PROGRESS_THEN_ERROR }
+      : sse({ jsonrpc: "2.0", id: 9, result: { content: [{ type: "text", text: "real answer" }] } });
+
+  seen.length = 0;
+  const res = await fetch(base + "/peektool/mcp", {
+    method: "POST",
+    headers: {
+      "x-proxy-key": PROXY_KEY,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "slow", arguments: {} } }),
+  });
+
+  const text = await res.text();
+  assert.equal(res.status, 200);
+  assert.match(text, /real answer/, "the error behind the progress frame should have triggered a replay");
+  assert.equal(seen.length, 2, "expected one replay after the real error");
+  assert.notEqual(seen[0]!.apiKey, seen[1]!.apiKey, "replay reused the same key");
+
+  await api("/api/services/peektool", undefined, "DELETE");
+});
+
+test("marks the key on an error behind a progress frame without replaying", async () => {
+  const save = await api("/api/services", {
+    id: "peekmark",
+    name: "Peek mark",
+    upstreamUrl,
+    auth: { type: "header", name: "x-api-key" },
+  });
+  assert.equal(save.status, 200);
+  await api("/api/services/peekmark/keys", { keys: "peekmark-one\npeekmark-two" });
+
+  script = () => ({ status: 200, headers: { "content-type": "text/event-stream" }, body: PROGRESS_THEN_ERROR });
+
+  seen.length = 0;
+  const before = (await (await api("/api/services/peekmark/keys")).json()) as any;
+  const startNow = Math.floor(Date.now() / 1000);
+  const coolingBefore = before.keys.filter((k: any) => k.cooldownUntil > startNow).length;
+
+  const res = await fetch(base + "/peekmark/mcp", {
+    method: "POST",
+    headers: {
+      "x-proxy-key": PROXY_KEY,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 9,
+      method: "tools/call",
+      params: { name: "unannotated", arguments: {} },
+    }),
+  });
+
+  const text = await res.text();
+  assert.equal(res.status, 200);
+  assert.match(text, /rate limit exceeded/, "the client should see the real error");
+  assert.equal(seen.length, 1, "an unannotated tool must not be replayed");
+
+  const after = (await (await api("/api/services/peekmark/keys")).json()) as any;
+  const checkNow = Math.floor(Date.now() / 1000);
+  const coolingAfter = after.keys.filter((k: any) => k.cooldownUntil > checkNow).length;
+  assert.equal(coolingAfter, coolingBefore + 1, "the key was recorded as healthy despite the error");
+
+  await api("/api/services/peekmark", undefined, "DELETE");
+});
