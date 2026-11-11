@@ -34,7 +34,7 @@ data: {"result":{"content":[{"type":"text","text":"The Firecrawl API key is inva
 
 The status code is 200. A proxy that only looks at headers sees nothing wrong. So a dead key keeps receiving traffic forever, the client gets error text, and the proxy has no idea.
 
-This project peeks at the first SSE event on the response stream. If it is a failure, the proxy discards the response and, when the failure proves nothing ran, picks another key and replays the same request body. If it is fine, the bytes already read are flushed back out and the rest streams through untouched.
+This project peeks at the response stream until an event carries a result or an error. Progress notifications and other one-way messages are skipped. If that event is a failure, the proxy discards the response and, when the failure proves nothing ran, picks another key and replays the same request body. If it is fine, the bytes already read are flushed back out and the rest streams through untouched.
 
 ## Measured, not assumed
 
@@ -167,7 +167,7 @@ Replay is bounded by what the upstream actually told us:
 
 ## Known limits
 
-First-event peeking only covers synchronous tools. If a tool emits a progress notification before the real result, the first frame carries no verdict, so the request streams through without replay. That is deliberate: covering it means buffering the whole response, which costs you streaming.
+Peeking reads up to the first concluding event, so a slow tool that emits progress notifications is covered. The cost is bounded at 256 KiB and 15 seconds. A response that produces neither a result nor an error within those bounds is passed through unjudged, the same way a slow synchronous tool would be.
 
 Upstreams that wrap errors in result prose rather than `isError` need a per-service rule added.
 
