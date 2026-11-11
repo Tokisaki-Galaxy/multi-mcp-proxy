@@ -413,23 +413,57 @@ test("injects the pooled credential and forwards the body untouched", async () =
   assert.ok(seen[0]!.apiKey?.startsWith("key-"), "pooled key was not injected");
 });
 
-test("replays with the next key when the first one is reported invalid", async () => {
-  // Answer 1 is the shape Firecrawl and Exa actually use: HTTP 200, error in body.
-  script = (n) =>
-    n === 0
-      ? sse({
-          result: {
-            content: [{ type: "text", text: "The API key is invalid or revoked." }],
-            isError: true,
-          },
-          jsonrpc: "2.0",
-          id: 9,
-        })
-      : sse({ result: { content: [{ type: "text", text: "real answer" }] }, jsonrpc: "2.0", id: 9 });
+test("does not replay a body-level failure for an unannotated tool", async () => {
+  // The shape Firecrawl and Exa actually use: HTTP 200, failure inside the body.
+  // The mock counts one side effect per upstream hit, so a replay would show up
+  // as two.
+  let sideEffects = 0;
+  script = () => {
+    sideEffects += 1;
+    return sse({
+      result: {
+        content: [{ type: "text", text: "rate limit exceeded after creating the job" }],
+        isError: true,
+      },
+      jsonrpc: "2.0",
+      id: 9,
+    });
+  };
 
   seen.length = 0;
   const beforeKeys = (await (await api("/api/services/svc/keys")).json()) as any;
-  const invalidBefore = beforeKeys.keys.filter((k: any) => k.status === "invalid").length;
+  const startNow = Math.floor(Date.now() / 1000);
+  const coolingBefore = beforeKeys.keys.filter((k: any) => k.cooldownUntil > startNow).length;
+
+  const res = await fetch(base + "/svc/mcp", {
+    method: "POST",
+    headers: {
+      "x-proxy-key": PROXY_KEY,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "x", arguments: {} } }),
+  });
+
+  const text = await res.text();
+  assert.equal(res.status, 200);
+  assert.match(text, /rate limit exceeded/, "the upstream error should reach the client unchanged");
+  assert.equal(seen.length, 1, "an unannotated tool must not be replayed");
+  assert.equal(sideEffects, 1, "the tool ran exactly once");
+
+  const afterKeys = (await (await api("/api/services/svc/keys")).json()) as any;
+  const checkNow = Math.floor(Date.now() / 1000);
+  const coolingAfter = afterKeys.keys.filter((k: any) => k.cooldownUntil > checkNow).length;
+  assert.equal(coolingAfter, coolingBefore + 1, "the failing key was not cooled down");
+});
+
+test("replays when the transport rejects the key before execution", async () => {
+  script = (n) =>
+    n === 0
+      ? { status: 401, headers: { "content-type": "application/json" }, body: '{"error":"Invalid API key"}' }
+      : sse({ result: { content: [{ type: "text", text: "real answer" }] }, jsonrpc: "2.0", id: 9 });
+
+  seen.length = 0;
 
   const res = await fetch(base + "/svc/mcp", {
     method: "POST",
@@ -444,12 +478,53 @@ test("replays with the next key when the first one is reported invalid", async (
   const text = await res.text();
   assert.equal(res.status, 200);
   assert.match(text, /real answer/);
-  assert.equal(seen.length, 2, "expected exactly one replay");
+  assert.equal(seen.length, 2, "a pre-execution 401 should be replayed");
   assert.notEqual(seen[0]!.apiKey, seen[1]!.apiKey, "replay reused the same key");
+});
 
-  const afterKeys = (await (await api("/api/services/svc/keys")).json()) as any;
-  const invalidAfter = afterKeys.keys.filter((k: any) => k.status === "invalid").length;
-  assert.equal(invalidAfter, invalidBefore + 1, "the failing key was not retired");
+test("replays a body-level failure for a tool that declared itself read-only", async () => {
+  // A client lists tools before calling one, so the proxy sees the annotation
+  // first. This is the only path that lets a body-level failure replay.
+  script = () =>
+    sse({
+      jsonrpc: "2.0",
+      id: 1,
+      result: {
+        tools: [{ name: "reader", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } }],
+      },
+    });
+  seen.length = 0;
+  await fetch(base + "/svc/mcp", {
+    method: "POST",
+    headers: { "x-proxy-key": PROXY_KEY, "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+  });
+
+  script = (n) =>
+    n === 0
+      ? sse({
+          result: { content: [{ type: "text", text: "rate limit exceeded" }], isError: true },
+          jsonrpc: "2.0",
+          id: 9,
+        })
+      : sse({ result: { content: [{ type: "text", text: "real answer" }] }, jsonrpc: "2.0", id: 9 });
+
+  seen.length = 0;
+  const res = await fetch(base + "/svc/mcp", {
+    method: "POST",
+    headers: {
+      "x-proxy-key": PROXY_KEY,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "reader", arguments: {} } }),
+  });
+
+  const text = await res.text();
+  assert.equal(res.status, 200);
+  assert.match(text, /real answer/);
+  assert.equal(seen.length, 2, "a read-only tool should be replayed");
+  assert.notEqual(seen[0]!.apiKey, seen[1]!.apiKey, "replay reused the same key");
 });
 
 test("widens a narrow Accept header for strict upstreams", async () => {
@@ -491,6 +566,10 @@ test("honours a 429 with Retry-After by cooling the key", async () => {
   script = () => ({ status: 429, headers: { "retry-after": "30" }, body: "" });
   seen.length = 0;
 
+  const before = (await (await api("/api/services/svc/keys")).json()) as any;
+  const startNow = Math.floor(Date.now() / 1000);
+  const previous = new Map<string, number>(before.keys.map((k: any) => [k.id, k.cooldownUntil]));
+
   await fetch(base + "/svc/mcp", {
     method: "POST",
     headers: { "x-proxy-key": PROXY_KEY, "content-type": "application/json" },
@@ -499,9 +578,11 @@ test("honours a 429 with Retry-After by cooling the key", async () => {
 
   const keys = (await (await api("/api/services/svc/keys")).json()) as any;
   const now = Math.floor(Date.now() / 1000);
-  const cooled = keys.keys.filter((k: any) => k.cooldownUntil > now);
-  // A 429 is replayable, so every key the request tried gets cooled. What
-  // matters is that a retry-after was honoured at all.
+  // Only look at keys this request readjusted. Earlier tests leave their own
+  // cool-downs behind and those say nothing about this 429.
+  const cooled = keys.keys.filter(
+    (k: any) => k.cooldownUntil > now && k.cooldownUntil !== previous.get(k.id)
+  );
   assert.ok(cooled.length >= 1, "no key was cooled");
   assert.ok(seen.length >= 1, "request never reached the upstream");
   for (const k of cooled) {

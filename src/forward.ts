@@ -16,12 +16,18 @@
 
 import type { ClassifyResult, QuotaRules, SelectResult, ServiceConfig } from "./types";
 import { classifyHttp, classifyMcpResult } from "./classify";
-import { collectCandidateIds, collectResultIds } from "./pool-logic";
+import {
+  collectCandidateIds,
+  collectResultIds,
+  collectToolFlags,
+  shouldReplay,
+  type ToolFlag,
+} from "./pool-logic";
 
 /** Abort the upstream header phase after this long. */
 const HEADER_TIMEOUT_MS = 120_000;
 /** Give up peeking after this many bytes and just stream. */
-const PEEK_BYTE_CAP = 64 * 1024;
+const PEEK_BYTE_CAP = 256 * 1024;
 /** Give up peeking after this long and just stream. */
 const PEEK_TIME_CAP_MS = 15_000;
 /** Cap for the JSON path, which must read the whole object to parse it. */
@@ -56,6 +62,10 @@ export interface PoolHandle {
     | { ok: true; key: SelectResult }
     | { ok: false; reason: "missing" | "unusable"; status: string; cooldownUntil: number }
   >;
+  /** Store the annotations published by a tools/list response. */
+  recordToolFlags?(flags: ToolFlag[]): Promise<number>;
+  /** Whether repeating a call to this tool cannot double an effect. */
+  isToolSafe?(name: string): Promise<boolean>;
 }
 
 export interface ForwardOutcome {
@@ -239,28 +249,43 @@ function judgePeek(
   return null;
 }
 
-/** Minimal view of the inbound request needed for affinity. */
+/** Minimal view of the inbound request needed for affinity and replay rules. */
 interface RequestInfo {
   /** JSON-RPC id, echoed on proxy-generated errors. */
   jsonrpcId: unknown;
   /** `params.arguments` for a tool call; undefined for everything else. */
   args: unknown;
+  /** JSON-RPC method, used to decide whether a retry is safe at all. */
+  method: string | null;
+  /** Tool name for `tools/call`, which is what the annotation lookup needs. */
+  toolName: string | null;
 }
 
+const EMPTY_REQUEST_INFO: RequestInfo = {
+  jsonrpcId: null,
+  args: undefined,
+  method: null,
+  toolName: null,
+};
+
 function readRequestInfo(raw: ArrayBuffer | null): RequestInfo {
-  if (!raw || raw.byteLength === 0) return { jsonrpcId: null, args: undefined };
+  if (!raw || raw.byteLength === 0) return EMPTY_REQUEST_INFO;
   try {
     const parsed = JSON.parse(new TextDecoder().decode(raw));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { jsonrpcId: null, args: undefined };
+      return EMPTY_REQUEST_INFO;
     }
     const record = parsed as Record<string, unknown>;
-    const params = record.params;
-    const args =
-      params && typeof params === "object" ? (params as Record<string, unknown>).arguments : undefined;
-    return { jsonrpcId: record.id ?? null, args };
+    const method = typeof record.method === "string" ? record.method : null;
+    const params =
+      record.params && typeof record.params === "object"
+        ? (record.params as Record<string, unknown>)
+        : null;
+    const toolName =
+      method === "tools/call" && params && typeof params.name === "string" ? params.name : null;
+    return { jsonrpcId: record.id ?? null, args: params?.arguments, method, toolName };
   } catch {
-    return { jsonrpcId: null, args: undefined };
+    return EMPTY_REQUEST_INFO;
   }
 }
 
@@ -287,11 +312,34 @@ function affinityError(jsonrpcId: unknown, message: string, reason: string): Res
   );
 }
 
-function shouldReplay(verdict: ClassifyResult, retryOn5xx: boolean): boolean {
-  if (verdict.verdict === "invalid" || verdict.verdict === "exhausted") return true;
-  if (verdict.verdict === "cooldown") return true;
-  if (verdict.verdict === "server") return retryOn5xx && verdict.requestNotProcessed;
-  return false;
+/**
+ * Methods whose repetition cannot change upstream state.
+ *
+ * `tools/call` is deliberately absent. It is the one request whose entire
+ * purpose may be a side effect, so it needs the tool itself to declare that
+ * repeating it is harmless.
+ */
+const IDEMPOTENT_METHODS = new Set([
+  "initialize",
+  "ping",
+  "tools/list",
+  "resources/list",
+  "resources/templates/list",
+  "prompts/list",
+  "completion/complete",
+]);
+
+/**
+ * Whether replaying this particular request is safe.
+ *
+ * Protocol-level methods answer yes by definition. A tool call answers yes only
+ * when its `tools/list` entry declared `readOnlyHint` or `idempotentHint`.
+ * Unknown tools and missing annotations answer no, matching the spec defaults.
+ */
+async function replaySafe(info: RequestInfo, pool: PoolHandle): Promise<boolean> {
+  if (info.method !== null && IDEMPOTENT_METHODS.has(info.method)) return true;
+  if (info.toolName === null || !pool.isToolSafe) return false;
+  return pool.isToolSafe(info.toolName).catch(() => false);
 }
 
 /**
@@ -320,6 +368,10 @@ export async function forwardMCP(
     const candidates = collectCandidateIds(info.args);
     if (candidates.length > 0) pinnedKeyId = await pool.lookupAffinity(candidates);
   }
+
+  // Resolve replay safety once. A pinned request never retries, so the lookup is
+  // only worth doing for rotating traffic.
+  const toolSafe = pinnedKeyId === null ? await replaySafe(info, pool) : false;
 
   const verdicts: ClassifyResult[] = [];
   let lastResponse: Response | null = null;
@@ -436,7 +488,7 @@ export async function forwardMCP(
         status: upstream.status,
         headers: responseHeaders(upstream),
       });
-      if (!pinnedKeyId && shouldReplay(verdict, service.retryOn5xx)) continue;
+      if (!pinnedKeyId && shouldReplay(verdict, { retryOn5xx: service.retryOn5xx, toolSafe })) continue;
       return { response: lastResponse, keyId: picked.keyId, attempts, verdicts, pinned: pinnedKeyId !== null };
     }
 
@@ -452,7 +504,7 @@ export async function forwardMCP(
     const { peek, reader } = await peekFirstEvent(upstream.body, contentType);
     const verdict = judgePeek(service, contentType, peek.text);
 
-    if (verdict && !pinnedKeyId && shouldReplay(verdict, service.retryOn5xx)) {
+    if (verdict && !pinnedKeyId && shouldReplay(verdict, { retryOn5xx: service.retryOn5xx, toolSafe })) {
       verdicts.push(verdict);
       await pool.report(picked.keyId, verdict, service.quota);
       await reader.cancel().catch(() => undefined);
@@ -475,6 +527,16 @@ export async function forwardMCP(
         { verdict: "ok", message: "", requestNotProcessed: false },
         service.quota
       );
+
+      // A tools/list response is the only place tool annotations appear. Store
+      // them on the way through rather than spending a second upstream call.
+      if (info.method === "tools/list" && pool.recordToolFlags) {
+        const flags: ToolFlag[] = [];
+        for (const payload of payloadsOf(contentType, peek.text)) {
+          flags.push(...collectToolFlags(payload));
+        }
+        if (flags.length > 0) await pool.recordToolFlags(flags).catch(() => 0);
+      }
 
       // Successful result: remember any resource ids it minted, so follow-up
       // calls land on this same key.
